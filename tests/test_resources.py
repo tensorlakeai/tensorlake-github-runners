@@ -1,0 +1,21 @@
+import pytest
+
+from github_runner_orchestrator.resources import (
+    DEFAULT_RUNNER_RESOURCES,
+    RUNNER_RESOURCE_PROFILES,
+    resources_for_labels,
+)
+
+
+def test_resource_profile_is_selected_from_runner_labels() -> None:
+    resources = resources_for_labels(["self-hosted", "tensorlake", "tensorlake-medium"])
+    assert resources == RUNNER_RESOURCE_PROFILES["tensorlake-medium"]
+
+
+def test_default_resources_are_used_without_a_profile_label() -> None:
+    assert resources_for_labels(["self-hosted", "tensorlake"]) == DEFAULT_RUNNER_RESOURCES
+
+
+def test_conflicting_resource_profile_labels_are_rejected() -> None:
+    with pytest.raises(ValueError, match="conflicting resource profile labels"):
+        resources_for_labels(["tensorlake-small", "tensorlake-large"])

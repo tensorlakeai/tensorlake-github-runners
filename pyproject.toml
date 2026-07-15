@@ -1,0 +1,27 @@
+[project]
+name = "tensorlake-github-workers"
+version = "0.1.0"
+description = "Ephemeral GitHub Actions runner orchestration with Tensorlake Orchestrate and Sandboxes."
+requires-python = ">=3.11"
+dependencies = [
+  "PyJWT[crypto]>=2.8.0",
+  "requests>=2.31.0",
+  "tensorlake>=0.5.90",
+]
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "ruff>=0.6.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

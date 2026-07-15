@@ -1,0 +1,48 @@
+name: Build reference example
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: [self-hosted, tensorlake, tensorlake-medium]
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --locked --all-extras
+
+      - name: Build Python package
+        run: uv build
+
+      - name: Lint Python
+        run: uv run --no-sync ruff check github_runner_orchestrator tests
+
+      - name: Check Python formatting
+        run: uv run --no-sync ruff format --check github_runner_orchestrator tests
+
+      - name: Validate shell scripts
+        run: bash -n scripts/*.sh
+
+      - name: Run tests
+        run: uv run --no-sync pytest -q
+
+      - name: Verify Docker
+        run: docker run --rm hello-world
