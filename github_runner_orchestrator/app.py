@@ -1,8 +1,21 @@
 import asyncio
 import os
 
-from tensorlake.applications import HttpBody, Image, RequestContext, application, function
+from tensorlake.applications import (
+    HttpBody,
+    Image,
+    Logger,
+    RequestContext,
+    application,
+    function,
+)
 
+from github_runner_orchestrator.cache import (
+    CACHE_MOUNT_PATH,
+    CACHE_SETTLE_SECONDS,
+    cache_mount_environment,
+    ensure_cache_filesystem,
+)
 from github_runner_orchestrator.github import (
     build_runner_name,
     generate_org_jit_config,
@@ -20,10 +33,12 @@ app_image = Image(
     name="github-runner-orchestrator",
     base_image="ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
 ).run("uv pip install --system 'PyJWT[crypto]>=2.8.0' requests 'tensorlake>=0.5.92'")
+logger = Logger.get_logger(module="github_runner_orchestrator")
 
 REQUIRED_RUNNER_LABEL = "tensorlake"
 RUNNER_IMAGE = "github-actions-runner"
 RUNNER_TIMEOUT_SECS = 7200
+CACHE_MOUNT_TIMEOUT_SECS = 30
 GITHUB_ORG_OVERRIDE: str | None = None
 
 
@@ -59,6 +74,48 @@ async def _wait_for_docker(sandbox) -> None:
     raise RuntimeError("Docker's systemd service did not become ready in the sandbox")
 
 
+async def _settle_cache_writes(sandbox) -> None:
+    sync_result = await sandbox.run("sync", [], timeout=30)
+    if sync_result.exit_code != 0:
+        logger.warning(
+            "Cache sync command failed",
+            stage="cache_settle",
+            exit_code=sync_result.exit_code,
+            output=sync_result.stderr or sync_result.stdout,
+        )
+    await asyncio.sleep(CACHE_SETTLE_SECONDS)
+
+
+async def _mount_cache_filesystem(
+    sandbox,
+    file_system_name: str,
+    mount_environment: dict[str, str],
+) -> None:
+    await sandbox.start_process(
+        "/usr/local/bin/tl",
+        [
+            "fs",
+            "mount",
+            "--foreground",
+            file_system_name,
+            CACHE_MOUNT_PATH,
+        ],
+        env=mount_environment,
+        name="tensorlake-cache-mount",
+    )
+
+    for _ in range(CACHE_MOUNT_TIMEOUT_SECS):
+        mounted = await sandbox.run("mountpoint", ["-q", CACHE_MOUNT_PATH], timeout=10)
+        if mounted.exit_code == 0:
+            return
+        await asyncio.sleep(1)
+
+    raise RuntimeError(
+        f"Cloud Volume {file_system_name!r} did not mount at {CACHE_MOUNT_PATH} "
+        f"within {CACHE_MOUNT_TIMEOUT_SECS} seconds"
+    )
+
+
 @function(
     image=app_image,
     timeout=7200,
@@ -68,6 +125,8 @@ async def _wait_for_docker(sandbox) -> None:
         "GITHUB_APP_PRIVATE_KEY",
         "RUNNER_GROUP_ID",
         "TENSORLAKE_API_KEY",
+        "TENSORLAKE_ORGANIZATION_ID",
+        "TENSORLAKE_PROJECT_ID",
     ],
 )
 async def run_github_runner(request_data: dict) -> dict:
@@ -88,6 +147,30 @@ async def run_github_runner(request_data: dict) -> dict:
         runner_group_id=runner_group_id,
         labels=request.labels,
     )
+
+    cache_filesystem_name = None
+    if request.repository:
+        try:
+            cache_filesystem_name = await asyncio.to_thread(
+                ensure_cache_filesystem,
+                request.repository,
+            )
+            logger.info(
+                "Repository cache volume is ready",
+                repository=request.repository,
+                cache_filesystem=cache_filesystem_name,
+                stage="cache_provision",
+            )
+        except Exception as error:
+            logger.warning(
+                "Running job without persistent cache because volume provisioning failed",
+                repository=request.repository,
+                stage="cache_provision",
+                error_type=type(error).__name__,
+                error=str(error),
+                exc_info=True,
+            )
+
     sandbox = await AsyncSandbox.create(
         image=RUNNER_IMAGE,
         cpus=resources.cpus,
@@ -95,24 +178,94 @@ async def run_github_runner(request_data: dict) -> dict:
         disk_mb=resources.disk_mb,
         timeout_secs=RUNNER_TIMEOUT_SECS,
     )
+    logger.info(
+        "Runner sandbox created",
+        repository=request.repository,
+        sandbox_id=sandbox.sandbox_id,
+        runner_name=runner_name,
+        cpus=resources.cpus,
+        memory_mb=resources.memory_mb,
+        disk_mb=resources.disk_mb,
+    )
 
+    cache_mounted = False
     try:
         await _wait_for_docker(sandbox)
+
+        if cache_filesystem_name:
+            try:
+                mount_environment = await asyncio.to_thread(
+                    cache_mount_environment,
+                    cache_filesystem_name,
+                )
+                await _mount_cache_filesystem(
+                    sandbox,
+                    cache_filesystem_name,
+                    mount_environment,
+                )
+                cache_mounted = True
+                logger.info(
+                    "Repository cache volume mounted",
+                    repository=request.repository,
+                    sandbox_id=sandbox.sandbox_id,
+                    cache_filesystem=cache_filesystem_name,
+                    cache_mount_path=CACHE_MOUNT_PATH,
+                    stage="cache_mount",
+                )
+            except Exception as error:
+                logger.warning(
+                    "Running job without persistent cache because volume mounting failed",
+                    repository=request.repository,
+                    sandbox_id=sandbox.sandbox_id,
+                    cache_filesystem=cache_filesystem_name,
+                    stage="cache_mount",
+                    error_type=type(error).__name__,
+                    error=str(error),
+                    exc_info=True,
+                )
+
+        runner_environment = {"RUNNER_ALLOW_RUNASROOT": "1"}
+        if cache_mounted:
+            runner_environment["TENSORLAKE_CACHE_DIR"] = CACHE_MOUNT_PATH
 
         result = await sandbox.run(
             "/opt/actions-runner/run.sh",
             ["--jitconfig", jit.encoded_jit_config],
-            env={"RUNNER_ALLOW_RUNASROOT": "1"},
+            env=runner_environment,
             working_dir="/opt/actions-runner",
+        )
+        logger.info(
+            "GitHub Actions runner exited",
+            repository=request.repository,
+            sandbox_id=sandbox.sandbox_id,
+            runner_name=runner_name,
+            exit_code=int(result.exit_code or 0),
+            cache_mounted=cache_mounted,
         )
         return {
             "sandbox_id": sandbox.sandbox_id,
             "runner_name": runner_name,
             "exit_code": int(result.exit_code or 0),
+            "cache_filesystem": cache_filesystem_name,
+            "cache_mounted": cache_mounted,
             "stdout_tail": (result.stdout or "")[-4000:],
             "stderr_tail": (result.stderr or "")[-4000:],
         }
     finally:
+        if cache_mounted:
+            try:
+                await _settle_cache_writes(sandbox)
+            except Exception as error:
+                logger.warning(
+                    "Failed to settle persistent cache writes before sandbox termination",
+                    repository=request.repository,
+                    sandbox_id=sandbox.sandbox_id,
+                    cache_filesystem=cache_filesystem_name,
+                    stage="cache_settle",
+                    error_type=type(error).__name__,
+                    error=str(error),
+                    exc_info=True,
+                )
         await sandbox.terminate()
 
 

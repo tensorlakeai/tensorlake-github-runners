@@ -7,9 +7,11 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
+    fuse3 \
     gzip \
     jq \
     tar \
+    util-linux \
   && install -m 0755 -d /etc/apt/keyrings \
   && curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc \
   && chmod a+r /etc/apt/keyrings/docker.asc \
@@ -25,6 +27,11 @@ RUN apt-get update \
     docker-compose-plugin \
   && systemctl enable containerd.service docker.service \
   && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL https://tensorlake.ai/install -o /tmp/install-tensorlake.sh \
+  && sh /tmp/install-tensorlake.sh --system --yes \
+  && rm /tmp/install-tensorlake.sh \
+  && tl version
 
 RUN mkdir -p /opt/actions-runner \
   && cd /opt/actions-runner \
