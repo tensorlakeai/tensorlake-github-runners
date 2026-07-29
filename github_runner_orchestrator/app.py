@@ -67,6 +67,7 @@ async def _wait_for_docker(sandbox) -> None:
         "GITHUB_APP_INSTALLATION_ID",
         "GITHUB_APP_PRIVATE_KEY",
         "RUNNER_GROUP_ID",
+        "TENSORLAKE_API_KEY",
     ],
 )
 async def run_github_runner(request_data: dict) -> dict:

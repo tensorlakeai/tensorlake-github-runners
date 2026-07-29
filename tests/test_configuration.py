@@ -14,6 +14,11 @@ def test_configuration_script_uses_clis_and_configures_org_webhook() -> None:
     assert "uv run --no-sync python" in script
     assert "tl secrets set --env-file" in script
     assert """output.write(f'{name}="{value}"\\n')""" in script
+    assert 'read -r -s -p "${prompt}: " value' in script
+    assert 'prompt_secret_required tensorlake_api_key "Tensorlake project API key"' in script
+    assert 'tensorlake_secret_exists "TENSORLAKE_API_KEY"' in script
+    assert "output.write(f'TENSORLAKE_API_KEY=\"{value}\"\\n')" in script
+    assert "ensure_tensorlake_api_key_secret" in script
     assert "tl app deploy" in script
     assert "--resume-from-step-6" in script
     assert '"events": ["workflow_job"]' in script
@@ -23,12 +28,13 @@ def test_configuration_script_uses_clis_and_configures_org_webhook() -> None:
     assert "It is NOT the webhook receiver" in script
 
     main = script.split("main() {", maxsplit=1)[1]
+    store_tensorlake_api_key = main.index("ensure_tensorlake_api_key_secret")
     store_secrets = main.index('tl secrets set --env-file "${secret_env}"')
     deploy_application = main.index('deploy_application "${deploy_log}"')
     create_webhook = main.index(
         'configure_organization_hook "${github_org}" "${endpoint_url}" "${webhook_secret}"'
     )
-    assert store_secrets < deploy_application < create_webhook
+    assert store_tensorlake_api_key < store_secrets < deploy_application < create_webhook
 
 
 def test_readme_explains_the_webhook_and_deployment_order() -> None:
@@ -42,7 +48,7 @@ def test_readme_explains_the_webhook_and_deployment_order() -> None:
 def test_self_hosted_workflow_builds_on_tensorlake_runner() -> None:
     workflow = Path(".github/workflows/build-reference.yml").read_text()
     assert "runs-on: [self-hosted, tensorlake, tensorlake-medium]" in workflow
-    assert "astral-sh/setup-uv@v8" in workflow
+    assert "astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2" in workflow
     assert "uv sync --locked --all-extras" in workflow
     assert "uv build" in workflow
     assert "uv run --no-sync pytest -q" in workflow
@@ -53,6 +59,7 @@ def test_application_image_installs_dependencies_with_uv() -> None:
     application = Path("github_runner_orchestrator/app.py").read_text()
     assert "ghcr.io/astral-sh/uv:python3.11-bookworm-slim" in application
     assert "uv pip install --system" in application
+    assert '"TENSORLAKE_API_KEY"' in application
 
 
 def test_deployment_uses_repository_root_and_current_public_endpoint_api() -> None:

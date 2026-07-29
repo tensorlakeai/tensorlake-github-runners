@@ -61,9 +61,10 @@ The exact installation order is:
 1. Install the local tools and sync the locked Python environment.
 2. Authenticate `gh` and `tl`, then confirm the GitHub identity and Tensorlake organization/project.
 3. Create and install the credentials-only GitHub App with its webhook disabled.
-4. Store its client ID, installation ID, private key, runner group ID, and a newly generated webhook
-   secret in Tensorlake. Tensorlake secrets exist at the project level and do not require an
-   application deployment to exist first; see the
+4. Enter a Tensorlake project API key, then store it with the GitHub App client ID, installation
+   ID, private key, runner group ID, and a newly generated webhook secret. The deployed runner uses
+   the API key to create sandboxes. Tensorlake secrets exist at the project level and do not require
+   an application deployment to exist first; see the
    [secrets documentation](https://docs.tensorlake.ai/applications/secrets).
 5. Build the reusable runner sandbox image.
 6. Deploy the Tensorlake application. The deployment reads the stored secrets and returns a public
@@ -71,9 +72,10 @@ The exact installation order is:
 7. Create a separate organization webhook for `workflow_job` events using that endpoint and the
    same webhook secret stored in step 4.
 
-The wizard performs all of these steps. It writes sensitive values only to permission-restricted
-temporary files, deletes those files when it exits, and never prints the private key or webhook
-secret.
+The wizard performs all of these steps. The API-key prompt is hidden; for a non-interactive run,
+provide it in `TENSORLAKE_API_KEY`. The wizard writes sensitive values only to
+permission-restricted temporary files, deletes those files when it exits, and never prints the API
+key, private key, or webhook secret.
 
 If setup reaches deployment and stops, resume without repeating the GitHub App inputs or rebuilding
 the runner image:
@@ -101,12 +103,14 @@ tl secrets set GITHUB_APP_CLIENT_ID='Iv1...'
 tl secrets set GITHUB_APP_INSTALLATION_ID='12345678'
 tl secrets set GITHUB_APP_PRIVATE_KEY="$(cat private-key.pem)"
 tl secrets set RUNNER_GROUP_ID='1'
+tl secrets set TENSORLAKE_API_KEY='tl_apiKey_...'
 ```
 
-`RUNNER_GROUP_ID` defaults to `1` if omitted. Keep `WEBHOOK_SECRET` in the current shell until the
-organization webhook is created; do not enter it in the disabled GitHub App webhook fields.
-Tensorlake injects stored secrets when an application is deployed. If you change a secret later,
-redeploy the application so the new value takes effect.
+Use a project-scoped Tensorlake API key for `TENSORLAKE_API_KEY`; the deployed function uses it to
+create and manage runner sandboxes. `RUNNER_GROUP_ID` defaults to `1` if omitted. Keep
+`WEBHOOK_SECRET` in the current shell until the organization webhook is created; do not enter it in
+the disabled GitHub App webhook fields. Tensorlake injects stored secrets when an application is
+deployed. If you change a secret later, redeploy the application so the new value takes effect.
 
 Build the runner image, then use the resumable deployment path to deploy the application and
 configure the organization webhook:
