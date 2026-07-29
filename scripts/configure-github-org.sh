@@ -28,7 +28,7 @@ print_installation_plan() {
   printf '  2. Authenticate the GitHub and Tensorlake CLIs.\n'
   printf '  3. Create and install a GitHub App for API credentials.\n'
   printf '     IMPORTANT: Disable the GitHub App webhook; it does not need a URL.\n'
-  printf '  4. Store a Tensorlake API key, the GitHub App credentials, and a generated webhook secret.\n'
+  printf '  4. Store Tensorlake project context, API credentials, and a generated webhook secret.\n'
   printf '     Tensorlake secrets exist independently of a deployment, so this happens first.\n'
   printf '  5. Build the reusable GitHub runner sandbox image.\n'
   printf '  6. Deploy the Tensorlake application and obtain its public endpoint URL.\n'
@@ -81,8 +81,11 @@ prompt_secret_required() {
 print_usage() {
   printf 'Usage:\n'
   printf '  %s\n' "$0"
+  printf '  %s --upgrade\n' "$0"
   printf '  %s --resume-from-step-6 [GITHUB_ORG]\n' "$0"
-  printf '\nThe resume mode redeploys the application and creates or updates its organization webhook.\n'
+  printf '\nThe upgrade mode refreshes project context and redeploys an existing application.\n'
+  printf 'It leaves the runner image, webhook URL, and webhook secret unchanged.\n'
+  printf 'The resume mode redeploys the application and creates or updates its organization webhook.\n'
   printf 'Set WEBHOOK_SECRET to reuse a known secret; otherwise the mode safely rotates it.\n'
 }
 
@@ -213,6 +216,60 @@ PY
   printf 'Stored TENSORLAKE_API_KEY in the active Tensorlake project.\n'
 }
 
+store_tensorlake_project_context_secrets() {
+  local identity_json="${TMP_DIR}/tensorlake-identity.json"
+  local context_env="${TMP_DIR}/tensorlake-context.env"
+
+  tl whoami -o json >"${identity_json}"
+  chmod 600 "${identity_json}"
+  uv run --no-sync python - "${identity_json}" "${context_env}" <<'PY'
+import json
+import sys
+
+
+def find_value(value, names):
+    if isinstance(value, dict):
+        for name in names:
+            found = value.get(name)
+            if isinstance(found, str) and found:
+                return found
+        for nested in value.values():
+            found = find_value(nested, names)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for nested in value:
+            found = find_value(nested, names)
+            if found:
+                return found
+    return None
+
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    identity = json.load(source)
+
+values = {
+    "TENSORLAKE_ORGANIZATION_ID": find_value(
+        identity, ("organizationId", "organization_id")
+    ),
+    "TENSORLAKE_PROJECT_ID": find_value(identity, ("projectId", "project_id")),
+}
+missing = [name for name, value in values.items() if not value]
+if missing:
+    raise SystemExit(
+        "Tensorlake identity did not include required project context: "
+        + ", ".join(missing)
+    )
+
+with open(sys.argv[2], "w", encoding="utf-8") as output:
+    for name, value in values.items():
+        output.write(f'{name}="{value}"\n')
+PY
+  chmod 600 "${context_env}"
+  tl secrets set --env-file "${context_env}"
+  printf 'Stored the active Tensorlake organization and project IDs for cache provisioning.\n'
+}
+
 generate_webhook_secret() {
   if command -v openssl >/dev/null 2>&1; then
     openssl rand -hex 32
@@ -320,6 +377,43 @@ endpoint_url_from_deploy_log() {
   printf '%s\n' "${endpoint_url}"
 }
 
+upgrade_installation() {
+  cd "${ROOT_DIR}"
+
+  local deploy_log endpoint_url
+
+  printf 'Upgrade an existing Tensorlake GitHub runner installation\n'
+  install_tl
+  install_uv
+  ensure_project_environment
+
+  if ! tl whoami >/dev/null 2>&1; then
+    info "Authenticate Tensorlake CLI"
+    tl login
+  fi
+
+  printf '\nTensorlake destination:\n'
+  tl whoami
+  printf '\nThe existing application in this project will be redeployed.\n'
+  confirm "Upgrade this Tensorlake installation?" || exit 0
+
+  ensure_tensorlake_api_key_secret
+  store_tensorlake_project_context_secrets
+
+  info "Deploy the updated Tensorlake application"
+  deploy_log="${TMP_DIR}/deploy.log"
+  if ! deploy_application "${deploy_log}"; then
+    die "Application deployment failed."
+  fi
+  endpoint_url="$(endpoint_url_from_deploy_log "${deploy_log}")"
+
+  printf '\nUpgrade complete.\n'
+  printf '  Tensorlake application endpoint: %s\n' "${endpoint_url}"
+  printf '  Organization webhook and secret: unchanged\n'
+  printf '  Runner image: unchanged\n'
+  printf '  Cache: one Tensorlake Cloud Volume is created lazily per GitHub repository\n'
+}
+
 resume_from_step_6() {
   cd "${ROOT_DIR}"
 
@@ -351,6 +445,7 @@ resume_from_step_6() {
   fi
   tl secrets set "GITHUB_WEBHOOK_SECRET=${webhook_secret}"
   ensure_tensorlake_api_key_secret
+  store_tensorlake_project_context_secrets
 
   phase 6 "Deploy the Tensorlake application and obtain its webhook URL"
   deploy_log="${TMP_DIR}/deploy.log"
@@ -367,6 +462,7 @@ resume_from_step_6() {
   printf '\nSetup complete.\n'
   printf '  Organization: %s\n' "${github_org}"
   printf '  Organization webhook URL: %s\n' "${endpoint_url}"
+  printf '  Cache: one Tensorlake Cloud Volume is created lazily per GitHub repository\n'
   printf '  Runner labels: self-hosted, tensorlake, and optionally tensorlake-small, tensorlake-medium, or tensorlake-large\n'
 }
 
@@ -435,10 +531,12 @@ main() {
   phase 4 "Store secrets in Tensorlake before deployment"
   printf 'Tensorlake stores these secrets independently of the application deployment.\n'
   printf 'The TENSORLAKE_API_KEY lets the deployed runner function create sandboxes in this project.\n'
+  printf 'The project context lets it lazily create one persistent cache volume per GitHub repository.\n'
   printf 'The generated GITHUB_WEBHOOK_SECRET is for the organization webhook in step 7,\n'
   printf 'not for the disabled webhook on the GitHub App. The same value is stored now and\n'
   printf 'sent to GitHub only after the deployment provides an endpoint URL.\n'
   ensure_tensorlake_api_key_secret
+  store_tensorlake_project_context_secrets
   webhook_secret="$(generate_webhook_secret)"
   private_key="$(<"${private_key_path}")"
   secret_env="${TMP_DIR}/secrets.env"
@@ -493,6 +591,7 @@ PY
   printf '  GitHub App: installed for runner API credentials; app webhook disabled\n'
   printf '  Organization webhook: active for workflow_job events\n'
   printf '  Organization webhook URL: %s\n' "${endpoint_url}"
+  printf '  Cache: one Tensorlake Cloud Volume is created lazily per GitHub repository\n'
   printf '  Runner labels: self-hosted, tensorlake, and optionally tensorlake-small, tensorlake-medium, or tensorlake-large\n'
   printf '\nNext step: run a workflow with runs-on: [self-hosted, tensorlake] to verify the installation.\n'
 }
@@ -500,6 +599,11 @@ PY
 case "${1:-}" in
   "")
     main
+    ;;
+  --upgrade)
+    shift
+    [[ "$#" -eq 0 ]] || die "--upgrade does not accept additional arguments."
+    upgrade_installation
     ;;
   --resume-from-step-6)
     shift

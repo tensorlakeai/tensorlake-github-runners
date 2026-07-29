@@ -3,6 +3,11 @@ import os
 
 from tensorlake.applications import HttpBody, Image, RequestContext, application, function
 
+from github_runner_orchestrator.cache import (
+    CACHE_MOUNT_PATH,
+    CACHE_SETTLE_SECONDS,
+    ensure_cache_filesystem,
+)
 from github_runner_orchestrator.github import (
     build_runner_name,
     generate_org_jit_config,
@@ -59,6 +64,13 @@ async def _wait_for_docker(sandbox) -> None:
     raise RuntimeError("Docker's systemd service did not become ready in the sandbox")
 
 
+async def _settle_cache_writes(sandbox) -> None:
+    sync_result = await sandbox.run("sync", [], timeout=30)
+    if sync_result.exit_code != 0:
+        print(f"Warning: cache sync failed: {sync_result.stderr or sync_result.stdout}")
+    await asyncio.sleep(CACHE_SETTLE_SECONDS)
+
+
 @function(
     image=app_image,
     timeout=7200,
@@ -68,10 +80,12 @@ async def _wait_for_docker(sandbox) -> None:
         "GITHUB_APP_PRIVATE_KEY",
         "RUNNER_GROUP_ID",
         "TENSORLAKE_API_KEY",
+        "TENSORLAKE_ORGANIZATION_ID",
+        "TENSORLAKE_PROJECT_ID",
     ],
 )
 async def run_github_runner(request_data: dict) -> dict:
-    from tensorlake.sandbox import AsyncSandbox
+    from tensorlake.sandbox import AsyncSandbox, FileSystemMount
 
     request = _runner_request_from_dict(request_data)
     credentials = _github_credentials()
@@ -88,31 +102,78 @@ async def run_github_runner(request_data: dict) -> dict:
         runner_group_id=runner_group_id,
         labels=request.labels,
     )
-    sandbox = await AsyncSandbox.create(
-        image=RUNNER_IMAGE,
-        cpus=resources.cpus,
-        memory_mb=resources.memory_mb,
-        disk_mb=resources.disk_mb,
-        timeout_secs=RUNNER_TIMEOUT_SECS,
-    )
+
+    cache_filesystem_id = None
+    if request.repository:
+        try:
+            cache_filesystem_id = await asyncio.to_thread(
+                ensure_cache_filesystem,
+                request.repository,
+            )
+        except Exception as error:
+            print(
+                f"Warning: running {request.repository} without persistent cache: "
+                f"{type(error).__name__}: {error}"
+            )
+
+    file_systems = None
+    if cache_filesystem_id:
+        file_systems = [
+            FileSystemMount(
+                file_system_id=cache_filesystem_id,
+                mount_path=CACHE_MOUNT_PATH,
+            )
+        ]
+
+    sandbox_create_options = {
+        "image": RUNNER_IMAGE,
+        "cpus": resources.cpus,
+        "memory_mb": resources.memory_mb,
+        "disk_mb": resources.disk_mb,
+        "timeout_secs": RUNNER_TIMEOUT_SECS,
+    }
+    try:
+        sandbox = await AsyncSandbox.create(
+            **sandbox_create_options,
+            file_systems=file_systems,
+        )
+    except Exception as error:
+        if not cache_filesystem_id:
+            raise
+        print(
+            f"Warning: cache mount failed; creating runner without persistent cache: "
+            f"{type(error).__name__}: {error}"
+        )
+        cache_filesystem_id = None
+        sandbox = await AsyncSandbox.create(**sandbox_create_options)
 
     try:
         await _wait_for_docker(sandbox)
 
+        runner_environment = {"RUNNER_ALLOW_RUNASROOT": "1"}
+        if cache_filesystem_id:
+            runner_environment["TENSORLAKE_CACHE_DIR"] = CACHE_MOUNT_PATH
+
         result = await sandbox.run(
             "/opt/actions-runner/run.sh",
             ["--jitconfig", jit.encoded_jit_config],
-            env={"RUNNER_ALLOW_RUNASROOT": "1"},
+            env=runner_environment,
             working_dir="/opt/actions-runner",
         )
         return {
             "sandbox_id": sandbox.sandbox_id,
             "runner_name": runner_name,
             "exit_code": int(result.exit_code or 0),
+            "cache_filesystem_id": cache_filesystem_id,
             "stdout_tail": (result.stdout or "")[-4000:],
             "stderr_tail": (result.stderr or "")[-4000:],
         }
     finally:
+        if cache_filesystem_id:
+            try:
+                await _settle_cache_writes(sandbox)
+            except Exception as error:
+                print(f"Warning: failed to settle cache writes: {type(error).__name__}: {error}")
         await sandbox.terminate()
 
 
