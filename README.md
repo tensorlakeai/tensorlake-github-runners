@@ -75,6 +75,18 @@ The wizard performs all of these steps. It writes sensitive values only to permi
 temporary files, deletes those files when it exits, and never prints the private key or webhook
 secret.
 
+If setup reaches deployment and stops, resume without repeating the GitHub App inputs or rebuilding
+the runner image:
+
+```bash
+WEBHOOK_SECRET="${WEBHOOK_SECRET:-}" ./scripts/configure-github-org.sh \
+  --resume-from-step-6 your-organization
+```
+
+When `WEBHOOK_SECRET` is still available in the current shell, the resume command reuses it.
+Otherwise it safely rotates the stored webhook secret before deploying, then creates or updates the
+organization webhook with the same new value.
+
 ### Manual setup
 
 The wizard is recommended because it creates or updates the matching organization webhook for you.
@@ -96,33 +108,20 @@ organization webhook is created; do not enter it in the disabled GitHub App webh
 Tensorlake injects stored secrets when an application is deployed. If you change a secret later,
 redeploy the application so the new value takes effect.
 
-Build the runner image and deploy the application:
+Build the runner image, then use the resumable deployment path to deploy the application and
+configure the organization webhook:
 
 ```bash
 ./scripts/build-runner-image.sh
-tl app deploy github_runner_orchestrator/app.py
-```
-
-Copy the `Public endpoint` URL from the deployment output, then create the organization webhook.
-The authenticated `gh` user must be an organization owner and needs the `admin:org_hook` scope:
-
-```bash
 GITHUB_ORG='your-organization'
-WEBHOOK_URL='https://the-public-endpoint-from-tensorlake'
-
-gh auth refresh --hostname github.com --scopes admin:org_hook
-gh api --method POST "orgs/${GITHUB_ORG}/hooks" \
-  -f name=web \
-  -F active=true \
-  -f 'events[]=workflow_job' \
-  -f "config[url]=${WEBHOOK_URL}" \
-  -f 'config[content_type]=json' \
-  -f "config[secret]=${WEBHOOK_SECRET}" \
-  -f 'config[insecure_ssl]=0'
+WEBHOOK_SECRET="${WEBHOOK_SECRET}" ./scripts/configure-github-org.sh \
+  --resume-from-step-6 "${GITHUB_ORG}"
 ```
 
-This manual `POST` is for a new webhook. For reruns, use the wizard so the existing webhook at the
-same endpoint is updated instead of duplicated.
+The resume command uses the repository-root `app.py` deployment entrypoint so the complete
+`github_runner_orchestrator` package is included. It also uses the locked project SDK to deploy,
+retrieves the generated public endpoint, and updates an existing matching webhook instead of
+duplicating it.
 
 The runner image name, timeout, required label, and optional GitHub organization override are
 ordinary constants near the top of `github_runner_orchestrator/app.py`. They are configuration,
@@ -145,18 +144,17 @@ application. Run it directly only for a manual installation or to rebuild the im
 ```
 
 For a manual or repeat deployment, make sure the required secrets have already been stored, then
-sync the locked environment and deploy:
+run the resumable deployment command:
 
 ```bash
-uv sync --locked --all-extras
-tl app deploy github_runner_orchestrator/app.py
+./scripts/configure-github-org.sh --resume-from-step-6 your-organization
 ```
 
 The Tensorlake application allows unauthenticated invocation for GitHub webhooks. Configure GitHub
 to send `workflow_job` events directly to the deployed `github_runner_webhook` application endpoint.
 The application receives the exact request bytes as an SDK `HttpBody`, verifies GitHub's HMAC
 signature before accepting work, and reads the case-insensitive, sanitized `Headers` collection
-from Tensorlake's request context. These APIs require `tensorlake>=0.5.90`.
+from Tensorlake's request context. These APIs require `tensorlake>=0.5.92`.
 
 ## Runner Resources
 

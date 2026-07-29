@@ -13,7 +13,9 @@ def test_configuration_script_uses_clis_and_configures_org_webhook() -> None:
     assert "uv sync --locked --python 3.11" in script
     assert "uv run --no-sync python" in script
     assert "tl secrets set --env-file" in script
+    assert """output.write(f'{name}="{value}"\\n')""" in script
     assert "tl app deploy" in script
+    assert "--resume-from-step-6" in script
     assert '"events": ["workflow_job"]' in script
     assert '"orgs/${organization}/hooks"' in script
     assert "Step %s of 7" in script
@@ -22,7 +24,7 @@ def test_configuration_script_uses_clis_and_configures_org_webhook() -> None:
 
     main = script.split("main() {", maxsplit=1)[1]
     store_secrets = main.index('tl secrets set --env-file "${secret_env}"')
-    deploy_application = main.index('tl app deploy "${ROOT_DIR}/github_runner_orchestrator/app.py"')
+    deploy_application = main.index('deploy_application "${deploy_log}"')
     create_webhook = main.index(
         'configure_organization_hook "${github_org}" "${endpoint_url}" "${webhook_secret}"'
     )
@@ -51,3 +53,15 @@ def test_application_image_installs_dependencies_with_uv() -> None:
     application = Path("github_runner_orchestrator/app.py").read_text()
     assert "ghcr.io/astral-sh/uv:python3.11-bookworm-slim" in application
     assert "uv pip install --system" in application
+
+
+def test_deployment_uses_repository_root_and_current_public_endpoint_api() -> None:
+    entrypoint = Path("app.py").read_text()
+    application = Path("github_runner_orchestrator/app.py").read_text()
+    deploy_helper = Path("scripts/tensorlake-deploy").read_text()
+
+    assert "from github_runner_orchestrator.app import" in entrypoint
+    assert '@application(allow=["unauthenticated_requests"])' in application
+    assert "from __future__ import annotations" not in application
+    assert "application_manifest_json" in deploy_helper
+    assert "/applications/public/{endpoint_id}" in deploy_helper

@@ -3,6 +3,8 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+APPLICATION_FILE="${ROOT_DIR}/app.py"
+APPLICATION_NAME="github_runner_webhook"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
 
@@ -59,6 +61,14 @@ prompt_required() {
     fi
     printf 'A value is required.\n'
   done
+}
+
+print_usage() {
+  printf 'Usage:\n'
+  printf '  %s\n' "$0"
+  printf '  %s --resume-from-step-6 [GITHUB_ORG]\n' "$0"
+  printf '\nThe resume mode redeploys the application and creates or updates its organization webhook.\n'
+  printf 'Set WEBHOOK_SECRET to reuse a known secret; otherwise the mode safely rotates it.\n'
 }
 
 as_root() {
@@ -225,6 +235,85 @@ configure_organization_hook() {
   fi
 }
 
+validate_github_org_owner() {
+  local github_org="$1"
+  local github_role
+
+  gh api --silent "orgs/${github_org}" || die "Cannot access GitHub organization '${github_org}'."
+  github_role="$(gh api "user/memberships/orgs/${github_org}" --jq .role 2>/dev/null)" || \
+    die "Cannot verify your membership in '${github_org}'. Authenticate gh with organization access and rerun."
+  [[ "${github_role}" == "admin" ]] || \
+    die "GitHub organization owner access is required; your role in '${github_org}' is '${github_role}'."
+  printf 'Confirmed that the active GitHub user is an owner of %s.\n' "${github_org}"
+}
+
+deploy_application() {
+  local deploy_log="$1"
+
+  TENSORLAKE_DEPLOY_APPLICATION_NAME="${APPLICATION_NAME}" \
+    PATH="${SCRIPT_DIR}:${PATH}" \
+    tl app deploy "${APPLICATION_FILE}" 2>&1 | tee "${deploy_log}"
+}
+
+endpoint_url_from_deploy_log() {
+  local deploy_log="$1"
+  local endpoint_url
+
+  endpoint_url="$(sed -n 's/^🌍 Public endpoint: //p' "${deploy_log}" | tail -n 1)"
+  [[ -n "${endpoint_url}" ]] || \
+    die "Deployment did not report a public endpoint URL."
+  printf '%s\n' "${endpoint_url}"
+}
+
+resume_from_step_6() {
+  cd "${ROOT_DIR}"
+
+  local github_org="${GITHUB_ORG:-${1:-}}"
+  local webhook_secret="${GITHUB_WEBHOOK_SECRET:-${WEBHOOK_SECRET:-}}"
+  local deploy_log endpoint_url
+
+  printf 'Resume Tensorlake GitHub runner setup from deployment\n'
+  install_gh
+  install_tl
+  install_uv
+  ensure_project_environment
+
+  gh auth status --hostname github.com >/dev/null 2>&1 || \
+    die "GitHub CLI is not authenticated. Run 'gh auth login --hostname github.com' and retry."
+  tl whoami >/dev/null 2>&1 || \
+    die "Tensorlake CLI is not authenticated. Run 'tl login' and retry."
+
+  if [[ -z "${github_org}" ]]; then
+    prompt_required github_org "GitHub organization"
+  fi
+  validate_github_org_owner "${github_org}"
+
+  if [[ -z "${webhook_secret}" ]]; then
+    webhook_secret="$(generate_webhook_secret)"
+    printf 'The previous webhook secret cannot be read back; rotating it before deployment.\n'
+  else
+    printf 'Reusing the webhook secret supplied in WEBHOOK_SECRET or GITHUB_WEBHOOK_SECRET.\n'
+  fi
+  tl secrets set "GITHUB_WEBHOOK_SECRET=${webhook_secret}"
+
+  phase 6 "Deploy the Tensorlake application and obtain its webhook URL"
+  deploy_log="${TMP_DIR}/deploy.log"
+  if ! deploy_application "${deploy_log}"; then
+    die "Application deployment failed."
+  fi
+  endpoint_url="$(endpoint_url_from_deploy_log "${deploy_log}")"
+  printf '\nTensorlake application endpoint: %s\n' "${endpoint_url}"
+
+  phase 7 "Create or update the GitHub organization webhook"
+  configure_organization_hook "${github_org}" "${endpoint_url}" "${webhook_secret}"
+  unset webhook_secret
+
+  printf '\nSetup complete.\n'
+  printf '  Organization: %s\n' "${github_org}"
+  printf '  Organization webhook URL: %s\n' "${endpoint_url}"
+  printf '  Runner labels: self-hosted, tensorlake, and optionally tensorlake-small, tensorlake-medium, or tensorlake-large\n'
+}
+
 main() {
   cd "${ROOT_DIR}"
   printf 'Tensorlake GitHub runner organization setup\n'
@@ -237,7 +326,7 @@ main() {
   install_uv
   ensure_project_environment
 
-  local github_org github_role github_app_client_id github_app_installation_id private_key_path
+  local github_org github_app_client_id github_app_installation_id private_key_path
   local runner_group_id webhook_secret private_key secret_env deploy_log endpoint_url
 
   phase 2 "Authenticate GitHub and Tensorlake"
@@ -245,12 +334,7 @@ main() {
 
   phase 3 "Create and install the credentials-only GitHub App"
   prompt_required github_org "GitHub organization"
-  gh api --silent "orgs/${github_org}" || die "Cannot access GitHub organization '${github_org}'."
-  github_role="$(gh api "user/memberships/orgs/${github_org}" --jq .role 2>/dev/null)" || \
-    die "Cannot verify your membership in '${github_org}'. Authenticate gh with organization access and rerun."
-  [[ "${github_role}" == "admin" ]] || \
-    die "GitHub organization owner access is required; your role in '${github_org}' is '${github_role}'."
-  printf 'Confirmed that the active GitHub user is an owner of %s.\n' "${github_org}"
+  validate_github_org_owner "${github_org}"
 
   printf '\nThe GitHub App is used only to authenticate GitHub API calls that create ephemeral runners.\n'
   printf 'It is NOT the webhook receiver. A separate organization webhook will be created in step 7.\n\n'
@@ -309,17 +393,17 @@ main() {
 import os
 import sys
 
-private_key = os.environ["GITHUB_APP_PRIVATE_KEY"].replace("\r\n", "\n").replace("\n", "\\n")
 values = {
     "GITHUB_WEBHOOK_SECRET": os.environ["GITHUB_WEBHOOK_SECRET"],
     "GITHUB_APP_CLIENT_ID": os.environ["GITHUB_APP_CLIENT_ID"],
     "GITHUB_APP_INSTALLATION_ID": os.environ["GITHUB_APP_INSTALLATION_ID"],
-    "GITHUB_APP_PRIVATE_KEY": private_key,
+    "GITHUB_APP_PRIVATE_KEY": os.environ["GITHUB_APP_PRIVATE_KEY"],
     "RUNNER_GROUP_ID": os.environ["RUNNER_GROUP_ID"],
 }
 with open(sys.argv[1], "w", encoding="utf-8") as output:
     for name, value in values.items():
-        output.write(f"{name}={value}\n")
+        value = value.replace("\r\n", "\n").replace('"', '\\"').replace("\n", "\\n")
+        output.write(f'{name}="{value}"\n')
 PY
   chmod 600 "${secret_env}"
   unset private_key
@@ -333,11 +417,10 @@ PY
   phase 6 "Deploy the Tensorlake application and obtain its webhook URL"
   printf 'The deployment can now read the secrets stored in step 4.\n'
   deploy_log="${TMP_DIR}/deploy.log"
-  if ! tl app deploy "${ROOT_DIR}/github_runner_orchestrator/app.py" 2>&1 | tee "${deploy_log}"; then
+  if ! deploy_application "${deploy_log}"; then
     die "Application deployment failed."
   fi
-  endpoint_url="$(sed -n 's/^🌍 Public endpoint: //p' "${deploy_log}" | tail -n 1)"
-  [[ -n "${endpoint_url}" ]] || die "Deployment did not report a public endpoint URL. Ensure the SDK and CLI include public endpoint support."
+  endpoint_url="$(endpoint_url_from_deploy_log "${deploy_log}")"
   printf '\nTensorlake application endpoint: %s\n' "${endpoint_url}"
   printf 'This URL belongs on the organization webhook, not on the GitHub App.\n'
 
@@ -356,4 +439,20 @@ PY
   printf '\nNext step: run a workflow with runs-on: [self-hosted, tensorlake] to verify the installation.\n'
 }
 
-main "$@"
+case "${1:-}" in
+  "")
+    main
+    ;;
+  --resume-from-step-6)
+    shift
+    [[ "$#" -le 1 ]] || die "--resume-from-step-6 accepts at most one GitHub organization."
+    resume_from_step_6 "${1:-}"
+    ;;
+  -h|--help)
+    print_usage
+    ;;
+  *)
+    print_usage >&2
+    die "Unknown argument: $1"
+    ;;
+esac
