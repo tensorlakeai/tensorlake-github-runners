@@ -4,6 +4,7 @@ import pytest
 
 from github_runner_orchestrator.cache import (
     MAX_FILESYSTEM_NAME_LENGTH,
+    cache_mount_environment,
     cache_filesystem_name,
     ensure_cache_filesystem,
 )
@@ -23,32 +24,76 @@ def test_cache_filesystem_name_rejects_missing_repository() -> None:
 
 
 def test_ensure_cache_filesystem_reuses_existing_project_volume(monkeypatch) -> None:
-    existing = SimpleNamespace(name=cache_filesystem_name("tensorlake/example"), id="file_system_1")
-    monkeypatch.setattr("tensorlake.sandbox.list_file_systems", lambda: [existing])
-    monkeypatch.setattr(
-        "tensorlake.sandbox.create_file_system",
-        lambda *_args, **_kwargs: pytest.fail("existing filesystem should be reused"),
-    )
+    existing = SimpleNamespace(name=cache_filesystem_name("tensorlake/example"))
 
-    assert ensure_cache_filesystem("tensorlake/example") == "file_system_1"
+    class Client:
+        def list(self):
+            return [existing]
+
+        def create(self, _name):
+            pytest.fail("existing filesystem should be reused")
+
+    monkeypatch.setattr("tensorlake.filesystem.FilesystemClient", Client)
+
+    assert ensure_cache_filesystem("tensorlake/example") == existing.name
 
 
 def test_ensure_cache_filesystem_creates_repository_volume(monkeypatch) -> None:
-    created = SimpleNamespace(id="file_system_2")
-    monkeypatch.setattr("tensorlake.sandbox.list_file_systems", lambda: [])
-    monkeypatch.setattr("tensorlake.sandbox.create_file_system", lambda *_args, **_kwargs: created)
+    created = SimpleNamespace(name=cache_filesystem_name("tensorlake/example"))
 
-    assert ensure_cache_filesystem("tensorlake/example") == "file_system_2"
+    class Client:
+        def list(self):
+            return []
+
+        def create(self, _name):
+            return created
+
+    monkeypatch.setattr("tensorlake.filesystem.FilesystemClient", Client)
+
+    assert ensure_cache_filesystem("tensorlake/example") == created.name
 
 
 def test_ensure_cache_filesystem_recovers_from_concurrent_creation(monkeypatch) -> None:
-    existing = SimpleNamespace(name=cache_filesystem_name("tensorlake/example"), id="file_system_3")
+    existing = SimpleNamespace(name=cache_filesystem_name("tensorlake/example"))
     listings = iter([[], [existing]])
-    monkeypatch.setattr("tensorlake.sandbox.list_file_systems", lambda: next(listings))
 
-    def race(*_args, **_kwargs):
-        raise RuntimeError("already exists")
+    class Client:
+        def list(self):
+            return next(listings)
 
-    monkeypatch.setattr("tensorlake.sandbox.create_file_system", race)
+        def create(self, _name):
+            raise RuntimeError("already exists")
 
-    assert ensure_cache_filesystem("tensorlake/example") == "file_system_3"
+    monkeypatch.setattr("tensorlake.filesystem.FilesystemClient", Client)
+
+    assert ensure_cache_filesystem("tensorlake/example") == existing.name
+
+
+def test_cache_mount_environment_uses_filesystem_scoped_credential(monkeypatch) -> None:
+    credential = SimpleNamespace(token="scoped-token", git_username="scoped-user")
+
+    class Client:
+        project_id = "project_example"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def credential(self, name):
+            assert name == "github-actions-cache-example"
+            return credential
+
+    monkeypatch.setattr(
+        "tensorlake.repositories.RepositoryClient.from_env",
+        lambda: Client(),
+    )
+    monkeypatch.setenv("TENSORLAKE_API_URL", "https://api.example.test")
+
+    assert cache_mount_environment("github-actions-cache-example") == {
+        "TENSORLAKE_GIT_TOKEN": "scoped-token",
+        "TENSORLAKE_GIT_USERNAME": "scoped-user",
+        "TENSORLAKE_PROJECT_ID": "project_example",
+        "TENSORLAKE_API_URL": "https://api.example.test",
+    }

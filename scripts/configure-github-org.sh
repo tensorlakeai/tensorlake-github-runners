@@ -83,8 +83,8 @@ print_usage() {
   printf '  %s\n' "$0"
   printf '  %s --upgrade\n' "$0"
   printf '  %s --resume-from-step-6 [GITHUB_ORG]\n' "$0"
-  printf '\nThe upgrade mode refreshes project context and redeploys an existing application.\n'
-  printf 'It leaves the runner image, webhook URL, and webhook secret unchanged.\n'
+  printf '\nThe upgrade mode refreshes project context, rebuilds the runner image, and redeploys.\n'
+  printf 'It leaves the webhook URL and webhook secret unchanged.\n'
   printf 'The resume mode redeploys the application and creates or updates its organization webhook.\n'
   printf 'Set WEBHOOK_SECRET to reuse a known secret; otherwise the mode safely rotates it.\n'
 }
@@ -400,6 +400,9 @@ upgrade_installation() {
   ensure_tensorlake_api_key_secret
   store_tensorlake_project_context_secrets
 
+  info "Build the updated Tensorlake runner sandbox image"
+  "${ROOT_DIR}/scripts/build-runner-image.sh"
+
   info "Deploy the updated Tensorlake application"
   deploy_log="${TMP_DIR}/deploy.log"
   if ! deploy_application "${deploy_log}"; then
@@ -410,7 +413,7 @@ upgrade_installation() {
   printf '\nUpgrade complete.\n'
   printf '  Tensorlake application endpoint: %s\n' "${endpoint_url}"
   printf '  Organization webhook and secret: unchanged\n'
-  printf '  Runner image: unchanged\n'
+  printf '  Runner image: rebuilt\n'
   printf '  Cache: one Tensorlake Cloud Volume is created lazily per GitHub repository\n'
 }
 

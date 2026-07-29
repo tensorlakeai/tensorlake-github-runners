@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 
 CACHE_FILESYSTEM_NAME_PREFIX = "github-actions-cache"
@@ -24,34 +25,47 @@ def cache_filesystem_name(repository: str) -> str:
 
 
 def ensure_cache_filesystem(repository: str) -> str:
-    """Find or lazily create the project filesystem used by one repository."""
-    from tensorlake.sandbox import create_file_system, list_file_systems
+    """Find or lazily create the Cloud Volume used by one repository."""
+    from tensorlake.filesystem import FilesystemClient
 
     name = cache_filesystem_name(repository)
+    client = FilesystemClient()
 
-    def existing_id() -> str | None:
-        for file_system in list_file_systems():
-            if file_system.name == name and file_system.id:
-                return file_system.id
+    def existing_name() -> str | None:
+        for file_system in client.list():
+            if file_system.name == name:
+                return file_system.name
         return None
 
-    file_system_id = existing_id()
-    if file_system_id:
-        return file_system_id
+    file_system_name = existing_name()
+    if file_system_name:
+        return file_system_name
 
     try:
-        created = create_file_system(
-            name,
-            description=f"Persistent GitHub Actions cache for {repository}",
-        )
+        created = client.create(name)
     except Exception:
-        # Concurrent first jobs can race to create the same named filesystem.
+        # Concurrent first jobs can race to create the same named Cloud Volume.
         # Re-read the project before surfacing the creation error.
-        file_system_id = existing_id()
-        if file_system_id:
-            return file_system_id
+        file_system_name = existing_name()
+        if file_system_name:
+            return file_system_name
         raise
 
-    if not created.id:
-        raise RuntimeError(f"Tensorlake created cache filesystem {name!r} without an id")
-    return created.id
+    return created.name
+
+
+def cache_mount_environment(file_system_name: str) -> dict[str, str]:
+    """Mint the filesystem-scoped credential consumed by ``tl fs mount``."""
+    from tensorlake.repositories import RepositoryClient
+
+    with RepositoryClient.from_env() as client:
+        credential = client.credential(file_system_name)
+        environment = {
+            "TENSORLAKE_GIT_TOKEN": credential.token,
+            "TENSORLAKE_GIT_USERNAME": credential.git_username,
+            "TENSORLAKE_PROJECT_ID": client.project_id,
+        }
+
+    if api_url := os.environ.get("TENSORLAKE_API_URL"):
+        environment["TENSORLAKE_API_URL"] = api_url
+    return environment

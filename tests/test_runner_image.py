@@ -16,16 +16,6 @@ def test_orchestrate_app_invokes_preinstalled_runner_directly() -> None:
     assert '"--jitconfig", jit.encoded_jit_config' in app_source
 
 
-def test_runner_mounts_and_exposes_repository_cache_volume() -> None:
-    app_source = Path("github_runner_orchestrator/app.py").read_text()
-    assert "ensure_cache_filesystem" in app_source
-    assert "FileSystemMount(" in app_source
-    assert 'runner_environment["TENSORLAKE_CACHE_DIR"] = CACHE_MOUNT_PATH' in app_source
-    assert "UV_CACHE_DIR" not in app_source
-    assert "await _settle_cache_writes(sandbox)" in app_source
-    assert "creating runner without persistent cache" in app_source
-
-
 def test_webhook_uses_raw_http_body_and_request_headers() -> None:
     app_source = Path("github_runner_orchestrator/app.py").read_text()
     assert "async def github_runner_webhook(payload: HttpBody)" in app_source

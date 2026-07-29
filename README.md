@@ -104,13 +104,10 @@ git pull --ff-only
 
 Confirm that `tl whoami` shows the Tensorlake project containing the existing installation. The
 upgrade command syncs the locked Python environment, reuses the stored Tensorlake API key, refreshes
-the organization and project context secrets, and redeploys the application. It does not ask for
-the GitHub App inputs, rebuild the runner image, rotate the webhook secret, or modify the
-organization webhook.
-
-If a release changes `sandbox-image/`, rebuild it separately with
-`./scripts/build-runner-image.sh`. The upgrade prints the deployed endpoint; if it differs from the
-organization webhook URL, run `--resume-from-step-6 your-organization` to update the webhook.
+the organization and project context secrets, rebuilds the runner image, and redeploys the
+application. It does not ask for the GitHub App inputs, rotate the webhook secret, or modify the
+organization webhook. The upgrade prints the deployed endpoint; if it differs from the organization
+webhook URL, run `--resume-from-step-6 your-organization` to update the webhook.
 
 ### Manual setup
 
@@ -163,7 +160,8 @@ The runner image is built once from the `tensorlake/ubuntu-systemd` base, then r
 `github-actions-runner` Tensorlake sandbox image. Following the
 [Tensorlake Docker guide](https://docs.tensorlake.ai/sandboxes/docker#install-docker), it installs
 Docker CE from Docker's Ubuntu repository and enables the Docker and containerd systemd services.
-Every runner waits for Docker to become ready before invoking
+It also installs the Tensorlake CLI and FUSE support used to mount Cloud Volumes. Every runner waits
+for Docker and, when a volume is available, its repository cache mount before invoking
 `/opt/actions-runner/run.sh --jitconfig ...`.
 
 The initial setup wizard performs this build after storing the secrets and before deploying the
@@ -208,10 +206,13 @@ and started for every profile, so workflows do not need a Docker-specific label.
 ## Persistent Workflow Cache
 
 Every GitHub repository gets its own Tensorlake Cloud Volume on its first runner job. The
-application finds or creates the volume in the configured Tensorlake project, mounts it at
-`/mnt/tensorlake-cache`, and exports that path to the job as `TENSORLAKE_CACHE_DIR`. Later
-sandboxes for the same repository mount the same volume, while other repositories receive separate
-volumes.
+application finds or creates the volume with Tensorlake's `FilesystemClient`. The runner image then
+starts `tl fs mount` inside the sandbox at `/mnt/tensorlake-cache`, and the orchestrator exports that
+path to the job as `TENSORLAKE_CACHE_DIR`. Later sandboxes for the same repository mount the same
+volume, while other repositories receive separate volumes.
+
+The mount receives a short-lived credential scoped to that one volume. The project API key remains
+inside the orchestrator function and is not passed to the runner sandbox or GitHub workflow.
 
 The cache is a normal writable directory rather than an `actions/cache`-compatible archive
 service. A workflow opts in by pointing a tool's cache directory at a namespaced child directory:
@@ -243,7 +244,8 @@ untrusted workflow code.
 Cloud Volume writes autosave while the job runs. After the Actions runner exits, the orchestrator
 syncs the sandbox and allows one autosave interval before terminating it. Cache provisioning and
 mounting are best-effort: if Tensorlake cannot prepare the volume, the job still runs without
-`TENSORLAKE_CACHE_DIR` and the warning appears in the application logs.
+`TENSORLAKE_CACHE_DIR`. The application emits structured logs with repository, sandbox, volume,
+stage, and error fields for provisioning or mount failures.
 
 ### uv
 
