@@ -61,9 +61,10 @@ The exact installation order is:
 1. Install the local tools and sync the locked Python environment.
 2. Authenticate `gh` and `tl`, then confirm the GitHub identity and Tensorlake organization/project.
 3. Create and install the credentials-only GitHub App with its webhook disabled.
-4. Store its client ID, installation ID, private key, runner group ID, and a newly generated webhook
-   secret in Tensorlake. Tensorlake secrets exist at the project level and do not require an
-   application deployment to exist first; see the
+4. Enter a Tensorlake project API key, then store it with the GitHub App client ID, installation
+   ID, private key, runner group ID, and a newly generated webhook secret. The deployed runner uses
+   the API key to create sandboxes. Tensorlake secrets exist at the project level and do not require
+   an application deployment to exist first; see the
    [secrets documentation](https://docs.tensorlake.ai/applications/secrets).
 5. Build the reusable runner sandbox image.
 6. Deploy the Tensorlake application. The deployment reads the stored secrets and returns a public
@@ -71,9 +72,22 @@ The exact installation order is:
 7. Create a separate organization webhook for `workflow_job` events using that endpoint and the
    same webhook secret stored in step 4.
 
-The wizard performs all of these steps. It writes sensitive values only to permission-restricted
-temporary files, deletes those files when it exits, and never prints the private key or webhook
-secret.
+The wizard performs all of these steps. The API-key prompt is hidden; for a non-interactive run,
+provide it in `TENSORLAKE_API_KEY`. The wizard writes sensitive values only to
+permission-restricted temporary files, deletes those files when it exits, and never prints the API
+key, private key, or webhook secret.
+
+If setup reaches deployment and stops, resume without repeating the GitHub App inputs or rebuilding
+the runner image:
+
+```bash
+WEBHOOK_SECRET="${WEBHOOK_SECRET:-}" ./scripts/configure-github-org.sh \
+  --resume-from-step-6 your-organization
+```
+
+When `WEBHOOK_SECRET` is still available in the current shell, the resume command reuses it.
+Otherwise it safely rotates the stored webhook secret before deploying, then creates or updates the
+organization webhook with the same new value.
 
 ### Manual setup
 
@@ -89,40 +103,29 @@ tl secrets set GITHUB_APP_CLIENT_ID='Iv1...'
 tl secrets set GITHUB_APP_INSTALLATION_ID='12345678'
 tl secrets set GITHUB_APP_PRIVATE_KEY="$(cat private-key.pem)"
 tl secrets set RUNNER_GROUP_ID='1'
+tl secrets set TENSORLAKE_API_KEY='tl_apiKey_...'
 ```
 
-`RUNNER_GROUP_ID` defaults to `1` if omitted. Keep `WEBHOOK_SECRET` in the current shell until the
-organization webhook is created; do not enter it in the disabled GitHub App webhook fields.
-Tensorlake injects stored secrets when an application is deployed. If you change a secret later,
-redeploy the application so the new value takes effect.
+Use a project-scoped Tensorlake API key for `TENSORLAKE_API_KEY`; the deployed function uses it to
+create and manage runner sandboxes. `RUNNER_GROUP_ID` defaults to `1` if omitted. Keep
+`WEBHOOK_SECRET` in the current shell until the organization webhook is created; do not enter it in
+the disabled GitHub App webhook fields. Tensorlake injects stored secrets when an application is
+deployed. If you change a secret later, redeploy the application so the new value takes effect.
 
-Build the runner image and deploy the application:
+Build the runner image, then use the resumable deployment path to deploy the application and
+configure the organization webhook:
 
 ```bash
 ./scripts/build-runner-image.sh
-tl app deploy github_runner_orchestrator/app.py
-```
-
-Copy the `Public endpoint` URL from the deployment output, then create the organization webhook.
-The authenticated `gh` user must be an organization owner and needs the `admin:org_hook` scope:
-
-```bash
 GITHUB_ORG='your-organization'
-WEBHOOK_URL='https://the-public-endpoint-from-tensorlake'
-
-gh auth refresh --hostname github.com --scopes admin:org_hook
-gh api --method POST "orgs/${GITHUB_ORG}/hooks" \
-  -f name=web \
-  -F active=true \
-  -f 'events[]=workflow_job' \
-  -f "config[url]=${WEBHOOK_URL}" \
-  -f 'config[content_type]=json' \
-  -f "config[secret]=${WEBHOOK_SECRET}" \
-  -f 'config[insecure_ssl]=0'
+WEBHOOK_SECRET="${WEBHOOK_SECRET}" ./scripts/configure-github-org.sh \
+  --resume-from-step-6 "${GITHUB_ORG}"
 ```
 
-This manual `POST` is for a new webhook. For reruns, use the wizard so the existing webhook at the
-same endpoint is updated instead of duplicated.
+The resume command uses the repository-root `app.py` deployment entrypoint so the complete
+`github_runner_orchestrator` package is included. It also uses the locked project SDK to deploy,
+retrieves the generated public endpoint, and updates an existing matching webhook instead of
+duplicating it.
 
 The runner image name, timeout, required label, and optional GitHub organization override are
 ordinary constants near the top of `github_runner_orchestrator/app.py`. They are configuration,
@@ -145,18 +148,17 @@ application. Run it directly only for a manual installation or to rebuild the im
 ```
 
 For a manual or repeat deployment, make sure the required secrets have already been stored, then
-sync the locked environment and deploy:
+run the resumable deployment command:
 
 ```bash
-uv sync --locked --all-extras
-tl app deploy github_runner_orchestrator/app.py
+./scripts/configure-github-org.sh --resume-from-step-6 your-organization
 ```
 
 The Tensorlake application allows unauthenticated invocation for GitHub webhooks. Configure GitHub
 to send `workflow_job` events directly to the deployed `github_runner_webhook` application endpoint.
 The application receives the exact request bytes as an SDK `HttpBody`, verifies GitHub's HMAC
 signature before accepting work, and reads the case-insensitive, sanitized `Headers` collection
-from Tensorlake's request context. These APIs require `tensorlake>=0.5.90`.
+from Tensorlake's request context. These APIs require `tensorlake>=0.5.92`.
 
 ## Runner Resources
 

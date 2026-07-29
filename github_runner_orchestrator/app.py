@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 import os
 
@@ -21,7 +19,7 @@ from github_runner_orchestrator.webhook import (
 app_image = Image(
     name="github-runner-orchestrator",
     base_image="ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
-).run("uv pip install --system 'PyJWT[crypto]>=2.8.0' requests 'tensorlake>=0.5.90'")
+).run("uv pip install --system 'PyJWT[crypto]>=2.8.0' requests 'tensorlake>=0.5.92'")
 
 REQUIRED_RUNNER_LABEL = "tensorlake"
 RUNNER_IMAGE = "github-actions-runner"
@@ -69,6 +67,7 @@ async def _wait_for_docker(sandbox) -> None:
         "GITHUB_APP_INSTALLATION_ID",
         "GITHUB_APP_PRIVATE_KEY",
         "RUNNER_GROUP_ID",
+        "TENSORLAKE_API_KEY",
     ],
 )
 async def run_github_runner(request_data: dict) -> dict:
@@ -117,7 +116,7 @@ async def run_github_runner(request_data: dict) -> dict:
         await sandbox.terminate()
 
 
-@application(allow=["unauthorized_requests"])
+@application(allow=["unauthenticated_requests"])
 @function(
     image=app_image,
     secrets=["GITHUB_WEBHOOK_SECRET"],

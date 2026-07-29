@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REAL_DEPLOY="${ROOT_DIR}/.venv/bin/tensorlake-deploy"
+
+[[ -x "${REAL_DEPLOY}" ]] || {
+  printf 'Error: project deployment helper not found. Run uv sync --locked --python 3.11.\n' >&2
+  exit 1
+}
+
+"${REAL_DEPLOY}" "$@"
+
+application_name="${TENSORLAKE_DEPLOY_APPLICATION_NAME:-}"
+[[ -n "${application_name}" ]] || exit 0
+
+endpoint_url="$(
+  "${ROOT_DIR}/.venv/bin/python" - "${application_name}" <<'PY'
+import json
+import sys
+import time
+
+from tensorlake.cli._common import build_context_from_env
+
+context = build_context_from_env()
+endpoint_id = None
+for attempt in range(10):
+    try:
+        manifest = json.loads(
+            context.cloud_client.application_manifest_json(sys.argv[1])
+        )
+        endpoint_id = manifest.get("public_endpoint_id")
+        if endpoint_id:
+            break
+    except Exception:
+        if attempt == 9:
+            raise
+    time.sleep(0.5)
+if not endpoint_id:
+    raise SystemExit(
+        f"deployed application {sys.argv[1]!r} did not receive a public endpoint"
+    )
+print(f"{context.api_url.rstrip('/')}/applications/public/{endpoint_id}")
+PY
+)"
+
+printf '🌍 Public endpoint: %s\n' "${endpoint_url}"
