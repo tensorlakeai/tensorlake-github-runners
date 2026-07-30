@@ -197,7 +197,7 @@ The Tensorlake application allows unauthenticated invocation for GitHub webhooks
 to send `workflow_job` events directly to the deployed `github_runner_webhook` application endpoint.
 The application receives the exact request bytes as an SDK `HttpBody`, verifies GitHub's HMAC
 signature before accepting work, and reads the case-insensitive, sanitized `Headers` collection
-from Tensorlake's request context. These APIs require `tensorlake>=0.5.92`.
+from Tensorlake's request context. These APIs require `tensorlake>=0.5.95`.
 
 ## Runner Resources
 
@@ -210,21 +210,25 @@ runs-on: [self-hosted, tensorlake, tensorlake-medium]
 
 | Label | CPUs | Memory | Disk |
 |---|---:|---:|---:|
-| no profile or `tensorlake-small` | 2 | 4 GiB | 50 GiB |
-| `tensorlake-medium` | 4 | 8 GiB | 100 GiB |
-| `tensorlake-large` | 8 | 16 GiB | 200 GiB |
+| no profile or `tensorlake-small` | 2 | 4 GiB | 10 GiB |
+| `tensorlake-medium` | 4 | 8 GiB | 50 GiB |
+| `tensorlake-large` | 8 | 16 GiB | 100 GiB |
+| `tensorlake-xlarge` | 16 | 32 GiB | 100 GiB |
 
 Profiles are defined in `github_runner_orchestrator/resources.py`; edit that mapping to expose
-different sizes. Requests with multiple resource-profile labels are rejected. Docker is installed
-and started for every profile, so workflows do not need a Docker-specific label.
+different sizes. Tensorlake runner disks are capped at 100 GiB. Requests with multiple
+resource-profile labels are rejected. Docker is installed and started for every profile, so
+workflows do not need a Docker-specific label.
 
 ## Persistent Workflow Cache
 
 Every GitHub repository gets its own Tensorlake Cloud Volume on its first runner job. The
-application finds or creates the volume with Tensorlake's `FilesystemClient`. The runner image then
-starts `tl fs mount` inside the sandbox at `/mnt/tensorlake-cache`, and the orchestrator exports that
-path to the job as `TENSORLAKE_CACHE_DIR`. Later sandboxes for the same repository mount the same
-volume, while other repositories receive separate volumes.
+application finds or creates the volume with Tensorlake's `FilesystemClient`. Empty volumes are
+initialized with a small `.tensorlake-cache-initialized` marker so they have a generation that can
+be mounted. The runner image then starts `tl fs mount` inside the sandbox at
+`/mnt/tensorlake-cache`, and the orchestrator exports that path to the job as
+`TENSORLAKE_CACHE_DIR`. Later sandboxes for the same repository mount the same volume, while other
+repositories receive separate volumes.
 
 The mount receives a short-lived credential scoped to that one volume. The project API key remains
 inside the orchestrator function and is not passed to the runner sandbox or GitHub workflow.
@@ -257,10 +261,15 @@ repository share this cache security boundary, so do not expose the self-hosted 
 untrusted workflow code.
 
 Cloud Volume writes autosave while the job runs. After the Actions runner exits, the orchestrator
-syncs the sandbox and allows one autosave interval before terminating it. Cache provisioning and
-mounting are best-effort: if Tensorlake cannot prepare the volume, the job still runs without
-`TENSORLAKE_CACHE_DIR`. The application emits structured logs with repository, sandbox, volume,
-stage, and error fields for provisioning or mount failures.
+syncs the sandbox and retries a safe unmount until the filesystem confirms that no unsaved work
+would be lost. Cache provisioning and mounting are best-effort: if Tensorlake cannot prepare the
+volume, the job still runs without `TENSORLAKE_CACHE_DIR`. The application emits structured logs
+with repository, sandbox, volume, stage, and error fields for provisioning or mount failures.
+
+The reference workflow deliberately verifies both `TENSORLAKE_CACHE_DIR` and its mountpoint before
+using the cache. This makes a cache regression fail visibly instead of writing to an identically
+named directory on the sandbox's ephemeral disk. Workflows that prefer best-effort caching can omit
+that verification.
 
 ### uv
 
@@ -280,7 +289,8 @@ self-hosted runner:
 ```
 
 `setup-uv` sets `UV_CACHE_DIR` for the job from this input. If cache provisioning is unavailable,
-the same path is created on the sandbox's ephemeral disk, so the job still runs without persistence.
+the same path is created on the sandbox's ephemeral disk, so a workflow that omits the verification
+step still runs without persistence.
 
 The cache and `.venv` are on different file systems, so uv may copy artifacts instead of
 hard-linking them. The volume still avoids repeated downloads and source builds, but benchmark the
@@ -404,7 +414,7 @@ volume snapshots for disposable cache data.
 
 ## Self-Test Workflow
 
-`.github/workflows/build-reference.yml` runs on a `tensorlake-medium` runner. It points uv at the
+`.github/workflows/build-reference.yml` runs on a `tensorlake-small` runner. It points uv at the
 persistent volume automatically when available and uses the sandbox-local uv cache otherwise. It
 installs and lints the Python project, builds its distribution, validates the setup scripts, runs
 the test suite, and runs Docker's `hello-world` image to verify the runner's Docker daemon. The

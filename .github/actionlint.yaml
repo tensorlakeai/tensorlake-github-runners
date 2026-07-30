@@ -4,3 +4,4 @@ self-hosted-runner:
     - tensorlake-small
     - tensorlake-medium
     - tensorlake-large
+    - tensorlake-xlarge

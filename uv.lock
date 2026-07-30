@@ -652,7 +652,7 @@ wheels = [
 
 [[package]]
 name = "tensorlake"
-version = "0.5.92"
+version = "0.5.95"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "grpcio" },
@@ -662,12 +662,12 @@ dependencies = [
     { name = "websocket-client" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/97/37/83f231ad8ccbf94e3521a9eb0910940070a668f0a5e86b2f9e76a5f37f98/tensorlake-0.5.92.tar.gz", hash = "sha256:cd6260cf54f8dc63aec6be8df9a18daed6150282116f34cf1aeb9299aab75470", size = 2392297, upload-time = "2026-07-29T18:14:01.182Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/30/1b/43ab690645ce66b643ecaed1932bc651d34338c1e4369e34c99894913525/tensorlake-0.5.95.tar.gz", hash = "sha256:7a1f892dd6edf54b56196302351bb824c072494619ccd456dd53fd642255d2df", size = 2392399, upload-time = "2026-07-30T20:01:48.201Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/14/f2/a442d9204966d9cfa964f74434b91c0ce496ecfd041e0794965be37787c4/tensorlake-0.5.92-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:a08c56076fb5c5a98669047dbbbeea6ec8f345e562a53a7b33f1d18228de12b8", size = 6964930, upload-time = "2026-07-29T18:13:53.572Z" },
-    { url = "https://files.pythonhosted.org/packages/3a/03/201dc3c51cca2278079d6544f15d93466b69993e62fbf83bdd8fa59b3d60/tensorlake-0.5.92-cp310-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:c29582708c855c27d3c8f40d751fcba2fd80316c2a88789a7889524702e8df1a", size = 7269266, upload-time = "2026-07-29T18:13:55.633Z" },
-    { url = "https://files.pythonhosted.org/packages/bc/2f/99a42f8f4a873f1a928586798b36709a208f0bbad71c0f786d7469f68596/tensorlake-0.5.92-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:7749004e063f3ae6ff537e33690365d563c5615e83761356e7b4490bbdfdbe16", size = 7502886, upload-time = "2026-07-29T18:13:57.611Z" },
-    { url = "https://files.pythonhosted.org/packages/80/05/7263a32720db6dc56e703c3662b7eb16941357d3a4ad1d9f1098e9394334/tensorlake-0.5.92-cp310-abi3-win_amd64.whl", hash = "sha256:f67191f0d5a1efa277e8d64b109fa8b589fbec5a120b71d38338fe42c60768a7", size = 7969840, upload-time = "2026-07-29T18:13:59.424Z" },
+    { url = "https://files.pythonhosted.org/packages/55/c4/0d3f5fb735deb8c2a79b0184a31b12b0509a3bcc27eb71e928c203f647fe/tensorlake-0.5.95-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:762026c8df5b5f026c1ce93061319a3f013df149b4bf64b949b5cc4876c9196d", size = 6964097, upload-time = "2026-07-30T20:01:37.882Z" },
+    { url = "https://files.pythonhosted.org/packages/84/f1/1690d21463eec9cf26f9b095e8d169decb84c3af84dfff4f16bca4c93e10/tensorlake-0.5.95-cp310-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:bd760dd27885a4902cdf64c9cc097250dcd26e0bf92667737a39c55861ef331a", size = 7269686, upload-time = "2026-07-30T20:01:40.084Z" },
+    { url = "https://files.pythonhosted.org/packages/fd/c9/eff897f43938aef153ca60e47827f7913969f455d5865ca7c1b6db59f90e/tensorlake-0.5.95-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:d778d218648552b65ac8ed0384ca561e3a1f6afa51e6b92e4d6c88cce4b106c9", size = 7503488, upload-time = "2026-07-30T20:01:43.397Z" },
+    { url = "https://files.pythonhosted.org/packages/e7/3d/82d47e2c2f880be802062af67a95f40c8911f4c3504aa1900496d7e31be1/tensorlake-0.5.95-cp310-abi3-win_amd64.whl", hash = "sha256:75c82049d82f636a84c9dc66a4a30853c9d8174e9c0495705bca995479be5d48", size = 7971269, upload-time = "2026-07-30T20:01:46.157Z" },
 ]
 
 [[package]]
@@ -692,7 +692,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "requests", specifier = ">=2.31.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6.0" },
-    { name = "tensorlake", specifier = ">=0.5.92" },
+    { name = "tensorlake", specifier = ">=0.5.95" },
 ]
 provides-extras = ["dev"]
 

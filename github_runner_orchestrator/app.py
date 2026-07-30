@@ -12,7 +12,8 @@ from tensorlake.applications import (
 
 from github_runner_orchestrator.cache import (
     CACHE_MOUNT_PATH,
-    CACHE_SETTLE_SECONDS,
+    CACHE_UNMOUNT_MAX_ATTEMPTS,
+    CACHE_UNMOUNT_RETRY_SECONDS,
     cache_mount_environment,
     ensure_cache_filesystem,
 )
@@ -32,7 +33,7 @@ from github_runner_orchestrator.webhook import (
 app_image = Image(
     name="github-runner-orchestrator",
     base_image="ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
-).run("uv pip install --system 'PyJWT[crypto]>=2.8.0' requests 'tensorlake>=0.5.92'")
+).run("uv pip install --system 'PyJWT[crypto]>=2.8.0' requests 'tensorlake>=0.5.95'")
 logger = Logger.get_logger(module="github_runner_orchestrator")
 
 REQUIRED_RUNNER_LABEL = "tensorlake"
@@ -81,7 +82,10 @@ async def _wait_for_docker(sandbox) -> None:
     raise RuntimeError("Docker's systemd service did not become ready in the sandbox")
 
 
-async def _settle_cache_writes(sandbox) -> None:
+async def _settle_cache_writes(
+    sandbox,
+    mount_environment: dict[str, str],
+) -> None:
     sync_result = await sandbox.run(
         "sync",
         [],
@@ -95,7 +99,32 @@ async def _settle_cache_writes(sandbox) -> None:
             exit_code=sync_result.exit_code,
             output=sync_result.stderr or sync_result.stdout,
         )
-    await asyncio.sleep(CACHE_SETTLE_SECONDS)
+
+    last_output = ""
+    for attempt in range(CACHE_UNMOUNT_MAX_ATTEMPTS):
+        unmount_result = await sandbox.run(
+            "/usr/local/bin/tl",
+            ["fs", "unmount", CACHE_MOUNT_PATH],
+            env={
+                **mount_environment,
+                "HOME": RUNNER_HOME,
+                "LOGNAME": RUNNER_USER,
+                "USER": RUNNER_USER,
+            },
+            timeout=30,
+            user=RUNNER_USER,
+        )
+        if unmount_result.exit_code == 0:
+            return
+
+        last_output = unmount_result.stderr or unmount_result.stdout
+        if attempt + 1 < CACHE_UNMOUNT_MAX_ATTEMPTS:
+            await asyncio.sleep(CACHE_UNMOUNT_RETRY_SECONDS)
+
+    raise RuntimeError(
+        f"Cloud Volume at {CACHE_MOUNT_PATH} did not autosave and unmount "
+        f"after {CACHE_UNMOUNT_MAX_ATTEMPTS} attempts: {last_output}"
+    )
 
 
 async def _mount_cache_filesystem(
@@ -121,6 +150,7 @@ async def _mount_cache_filesystem(
         env=process_environment,
         user=RUNNER_USER,
         name="tensorlake-cache-mount",
+        restart={"policy": "never"},
     )
 
     for _ in range(CACHE_MOUNT_TIMEOUT_SECS):
@@ -132,6 +162,22 @@ async def _mount_cache_filesystem(
         )
         if mounted.exit_code == 0:
             return
+
+        mount_process = await sandbox.get_process("tensorlake-cache-mount")
+        if mount_process.status != "running":
+            stderr = await sandbox.get_stderr("tensorlake-cache-mount")
+            output = "\n".join(stderr.lines).strip()[-2000:]
+            exit_code = mount_process.exit_code
+            process_status = getattr(
+                mount_process.status,
+                "value",
+                mount_process.status,
+            )
+            raise RuntimeError(
+                f"Cloud Volume {file_system_name!r} mount process exited "
+                f"with status {process_status} and exit code {exit_code}: "
+                f"{output or 'no stderr output'}"
+            )
         await asyncio.sleep(1)
 
     raise RuntimeError(
@@ -214,6 +260,7 @@ async def run_github_runner(request_data: dict) -> dict:
     )
 
     cache_mounted = False
+    mount_environment = None
     try:
         await _wait_for_docker(sandbox)
 
@@ -285,10 +332,10 @@ async def run_github_runner(request_data: dict) -> dict:
     finally:
         if cache_mounted:
             try:
-                await _settle_cache_writes(sandbox)
+                await _settle_cache_writes(sandbox, mount_environment or {})
             except Exception as error:
                 logger.warning(
-                    "Failed to settle persistent cache writes before sandbox termination",
+                    "Failed to autosave and unmount persistent cache before sandbox termination",
                     repository=request.repository,
                     sandbox_id=sandbox.sandbox_id,
                     cache_filesystem=cache_filesystem_name,

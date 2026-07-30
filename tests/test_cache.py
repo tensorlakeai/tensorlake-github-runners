@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from github_runner_orchestrator.cache import (
+    CACHE_INITIALIZATION_PATH,
     MAX_FILESYSTEM_NAME_LENGTH,
     cache_mount_environment,
     cache_filesystem_name,
@@ -24,11 +25,18 @@ def test_cache_filesystem_name_rejects_missing_repository() -> None:
 
 
 def test_ensure_cache_filesystem_reuses_existing_project_volume(monkeypatch) -> None:
-    existing = SimpleNamespace(name=cache_filesystem_name("tensorlake/example"))
+    existing = SimpleNamespace(
+        name=cache_filesystem_name("tensorlake/example"),
+        status=lambda: SimpleNamespace(version_id="version-1"),
+    )
 
     class Client:
         def list(self):
             return [existing]
+
+        def get(self, name):
+            assert name == existing.name
+            return existing
 
         def create(self, _name):
             pytest.fail("existing filesystem should be reused")
@@ -38,8 +46,34 @@ def test_ensure_cache_filesystem_reuses_existing_project_volume(monkeypatch) -> 
     assert ensure_cache_filesystem("tensorlake/example") == existing.name
 
 
+def test_ensure_cache_filesystem_repairs_existing_empty_volume(monkeypatch) -> None:
+    writes = []
+    existing = SimpleNamespace(
+        name=cache_filesystem_name("tensorlake/example"),
+        status=lambda: SimpleNamespace(version_id=None),
+        write_file=lambda *args, **kwargs: writes.append((args, kwargs)),
+    )
+
+    class Client:
+        def list(self):
+            return [existing]
+
+        def get(self, _name):
+            return existing
+
+    monkeypatch.setattr("tensorlake.filesystem.FilesystemClient", Client)
+
+    assert ensure_cache_filesystem("tensorlake/example") == existing.name
+    assert writes[0][0][0] == CACHE_INITIALIZATION_PATH
+
+
 def test_ensure_cache_filesystem_creates_repository_volume(monkeypatch) -> None:
-    created = SimpleNamespace(name=cache_filesystem_name("tensorlake/example"))
+    writes = []
+    created = SimpleNamespace(
+        name=cache_filesystem_name("tensorlake/example"),
+        status=lambda: SimpleNamespace(version_id=None),
+        write_file=lambda *args, **kwargs: writes.append((args, kwargs)),
+    )
 
     class Client:
         def list(self):
@@ -51,18 +85,60 @@ def test_ensure_cache_filesystem_creates_repository_volume(monkeypatch) -> None:
     monkeypatch.setattr("tensorlake.filesystem.FilesystemClient", Client)
 
     assert ensure_cache_filesystem("tensorlake/example") == created.name
+    assert writes == [
+        (
+            (
+                CACHE_INITIALIZATION_PATH,
+                "Initialized for Tensorlake GitHub Actions runner caches.\n",
+            ),
+            {"message": "Initialize GitHub Actions runner cache"},
+        )
+    ]
 
 
 def test_ensure_cache_filesystem_recovers_from_concurrent_creation(monkeypatch) -> None:
-    existing = SimpleNamespace(name=cache_filesystem_name("tensorlake/example"))
+    existing = SimpleNamespace(
+        name=cache_filesystem_name("tensorlake/example"),
+        status=lambda: SimpleNamespace(version_id="version-1"),
+    )
     listings = iter([[], [existing]])
 
     class Client:
         def list(self):
             return next(listings)
 
+        def get(self, name):
+            assert name == existing.name
+            return existing
+
         def create(self, _name):
             raise RuntimeError("already exists")
+
+    monkeypatch.setattr("tensorlake.filesystem.FilesystemClient", Client)
+
+    assert ensure_cache_filesystem("tensorlake/example") == existing.name
+
+
+def test_ensure_cache_filesystem_initialization_race_accepts_other_writer(
+    monkeypatch,
+) -> None:
+    versions = iter([None, "version-1"])
+
+    def write_file(*_args, **_kwargs):
+        raise RuntimeError("head changed")
+
+    existing = SimpleNamespace(
+        name=cache_filesystem_name("tensorlake/example"),
+        status=lambda: SimpleNamespace(version_id=next(versions)),
+        write_file=write_file,
+    )
+
+    class Client:
+        def list(self):
+            return [existing]
+
+        def get(self, _name):
+            return existing
 
     monkeypatch.setattr("tensorlake.filesystem.FilesystemClient", Client)
 
