@@ -13,6 +13,9 @@ dependencies = [
 requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.packages.find]
+include = ["github_runner_orchestrator*"]
+
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0.0",
