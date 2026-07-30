@@ -17,110 +17,17 @@ jobs:
   build:
     runs-on: [self-hosted, tensorlake, tensorlake-small]
     timeout-minutes: 30
-    env:
-      REFERENCE_PYTHON_VERSION: "3.11"
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Verify persistent cache mount
-        shell: bash
-        run: |
-          if [[ -z "${TENSORLAKE_CACHE_DIR:-}" ]]; then
-            echo "::error::The runner did not provide a persistent cache directory."
-            exit 1
-          fi
-          if ! mountpoint -q "${TENSORLAKE_CACHE_DIR}"; then
-            echo "::error::${TENSORLAKE_CACHE_DIR} is not a mounted Cloud Volume."
-            exit 1
-          fi
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
-        with:
-          enable-cache: false
-
-      - name: Install Python
-        run: uv python install "${REFERENCE_PYTHON_VERSION}"
-
-      - name: Configure persistent uv environment
+      - name: Set up cached uv environment
         id: uv-environment
-        shell: bash
-        run: |
-          python_executable="$(uv python find "${REFERENCE_PYTHON_VERSION}")"
-          python_identity="$("${python_executable}" -c 'import platform, sys; print(f"{sys.implementation.name}-{platform.python_version()}")')"
-          lock_hash="$(sha256sum uv.lock | cut -d ' ' -f 1)"
-          scope_hash="$(printf '%s\0%s' "${GITHUB_WORKFLOW}" "${GITHUB_REF}" | sha256sum | cut -c 1-16)"
-          environment_key="${RUNNER_OS}-${RUNNER_ARCH}-${python_identity}/${GITHUB_JOB}-${scope_hash}-${lock_hash}"
-          cache_root="${TENSORLAKE_CACHE_DIR:-/mnt/tensorlake-cache}"
-          environment_dir="${RUNNER_TEMP}/uv-environments/${environment_key}"
-          environment_archive="${cache_root}/uv-environment-archives-v1/${environment_key}.tar.gz"
-          restore_duration_ms=0
-          mkdir -p "$(dirname "${environment_dir}")" "$(dirname "${environment_archive}")"
-
-          if [[ -f "${environment_archive}" ]]; then
-            environment_state="warm"
-            restore_started_ns="$(date +%s%N)"
-            tar -xzf "${environment_archive}" -C "$(dirname "${environment_dir}")"
-            restore_finished_ns="$(date +%s%N)"
-            restore_duration_ms="$(( (restore_finished_ns - restore_started_ns) / 1000000 ))"
-            if [[ ! -f "${environment_dir}/pyvenv.cfg" ]]; then
-              echo "::error::The persistent uv environment archive is invalid."
-              exit 1
-            fi
-          else
-            environment_state="cold"
-          fi
-
-          {
-            echo "UV_PROJECT_ENVIRONMENT=${environment_dir}"
-            echo "TENSORLAKE_UV_ENVIRONMENT_ARCHIVE=${environment_archive}"
-            echo "TENSORLAKE_UV_ENVIRONMENT_KEY=${environment_key}"
-            echo "TENSORLAKE_UV_ENVIRONMENT_RESTORE_DURATION_MS=${restore_duration_ms}"
-            echo "TENSORLAKE_UV_ENVIRONMENT_STATE=${environment_state}"
-          } >> "${GITHUB_ENV}"
-          {
-            echo "key=${environment_key}"
-            echo "state=${environment_state}"
-          } >> "${GITHUB_OUTPUT}"
-
-      - name: Install dependencies
-        id: uv-sync
-        shell: bash
-        run: |
-          started_ns="$(date +%s%N)"
-          uv sync --locked --all-extras
-          finished_ns="$(date +%s%N)"
-          duration_ms="$(( (finished_ns - started_ns) / 1000000 ))"
-          duration_seconds="$(awk -v ms="${duration_ms}" 'BEGIN { printf "%.3f", ms / 1000 }')"
-          publish_duration_ms=0
-
-          if [[ "${TENSORLAKE_UV_ENVIRONMENT_STATE}" == "cold" ]]; then
-            publish_started_ns="$(date +%s%N)"
-            temporary_archive="${TENSORLAKE_UV_ENVIRONMENT_ARCHIVE}.tmp.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}"
-            tar -czf "${temporary_archive}" \
-              -C "$(dirname "${UV_PROJECT_ENVIRONMENT}")" \
-              "$(basename "${UV_PROJECT_ENVIRONMENT}")"
-            mv -f "${temporary_archive}" "${TENSORLAKE_UV_ENVIRONMENT_ARCHIVE}"
-            sync
-            sleep 6
-            publish_finished_ns="$(date +%s%N)"
-            publish_duration_ms="$(( (publish_finished_ns - publish_started_ns) / 1000000 ))"
-          fi
-
-          echo "duration-ms=${duration_ms}" >> "${GITHUB_OUTPUT}"
-          echo "UV_SYNC_TIMING duration_ms=${duration_ms} environment_state=${TENSORLAKE_UV_ENVIRONMENT_STATE} key=${TENSORLAKE_UV_ENVIRONMENT_KEY}"
-          echo "UV_ARCHIVE_TIMING restore_duration_ms=${TENSORLAKE_UV_ENVIRONMENT_RESTORE_DURATION_MS} publish_duration_ms=${publish_duration_ms} environment_state=${TENSORLAKE_UV_ENVIRONMENT_STATE}"
-          {
-            echo "### Persistent uv environment"
-            echo
-            echo "- State before sync: \`${TENSORLAKE_UV_ENVIRONMENT_STATE}\`"
-            echo "- Archive restore: \`${TENSORLAKE_UV_ENVIRONMENT_RESTORE_DURATION_MS}ms\`"
-            echo "- Sync duration: \`${duration_seconds}s\`"
-            echo "- Archive publish: \`${publish_duration_ms}ms\`"
-            echo "- Key: \`${TENSORLAKE_UV_ENVIRONMENT_KEY}\`"
-          } >> "${GITHUB_STEP_SUMMARY}"
+        uses: ./actions/setup-uv-cache
+        with:
+          python-version: "3.11"
+          sync-args: --locked --all-extras
 
       - name: Build Python package
         run: uv build

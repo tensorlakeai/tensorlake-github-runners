@@ -22,6 +22,8 @@ keeps the GitHub contract and removes the AWS scheduling layer:
 - `github_runner_orchestrator/cache.py` - Per-repository cache volume naming and provisioning.
 - `github_runner_orchestrator/github.py` - GitHub App JWT, installation token, and JIT runner APIs.
 - `github_runner_orchestrator/webhook.py` - HMAC verification and `workflow_job` filtering.
+- `actions/setup-uv-cache/action.yml` - Reusable uv environment archive cache action.
+- `actions/setup-rust-cache/action.yml` - Reusable Cargo, sccache, and target cache action.
 - `sandbox-image/Dockerfile` - Reusable GitHub Actions runner sandbox image built from an OCI base.
 - `uv.lock` - Locked application and development dependency versions.
 
@@ -292,67 +294,37 @@ result for dependency sets dominated by small prebuilt wheels.
 
 For a dependency set where those cross-filesystem copies are expensive, keep the live environment
 on the sandbox's local disk and store a compressed, compatibility-keyed environment archive on the
-volume:
+volume with the repository's composite action:
 
 ```yaml
 concurrency:
   group: uv-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  PYTHON_VERSION: "3.11"
-
 - uses: actions/checkout@v6
 
-- uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+- name: Set up cached uv environment
+  id: uv-cache
+  uses: tensorlakeai/tensorlake-github-runners/actions/setup-uv-cache@main
   with:
-    enable-cache: false
+    python-version: "3.11"
+    sync-args: --locked --all-extras
 
-- run: uv python install "${PYTHON_VERSION}"
-
-- name: Restore persistent uv environment
-  shell: bash
-  run: |
-    python_path="$(uv python find "${PYTHON_VERSION}")"
-    python_identity="$("${python_path}" -c 'import platform, sys; print(f"{sys.implementation.name}-{platform.python_version()}")')"
-    lock_hash="$(sha256sum uv.lock | cut -d ' ' -f 1)"
-    scope_hash="$(printf '%s\0%s' "${GITHUB_WORKFLOW}" "${GITHUB_REF}" | sha256sum | cut -c 1-16)"
-    environment_key="${RUNNER_OS}-${RUNNER_ARCH}-${python_identity}/${GITHUB_JOB}-${scope_hash}-${lock_hash}"
-    cache_root="${TENSORLAKE_CACHE_DIR:-/mnt/tensorlake-cache}"
-    environment_dir="${RUNNER_TEMP}/uv-environments/${environment_key}"
-    environment_archive="${cache_root}/uv-environment-archives-v1/${environment_key}.tar.gz"
-    mkdir -p "$(dirname "${environment_dir}")" "$(dirname "${environment_archive}")"
-    if [[ -f "${environment_archive}" ]]; then
-      tar -xzf "${environment_archive}" -C "$(dirname "${environment_dir}")"
-      environment_state=warm
-    else
-      environment_state=cold
-    fi
-    {
-      echo "UV_PROJECT_ENVIRONMENT=${environment_dir}"
-      echo "UV_ENVIRONMENT_ARCHIVE=${environment_archive}"
-      echo "UV_ENVIRONMENT_STATE=${environment_state}"
-    } >> "${GITHUB_ENV}"
-
-- name: Synchronize and cache the environment
-  run: |
-    uv sync --locked
-    if [[ "${UV_ENVIRONMENT_STATE}" == "cold" ]]; then
-      temporary_archive="${UV_ENVIRONMENT_ARCHIVE}.tmp.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}"
-      tar -czf "${temporary_archive}" \
-        -C "$(dirname "${UV_PROJECT_ENVIRONMENT}")" \
-        "$(basename "${UV_PROJECT_ENVIRONMENT}")"
-      mv -f "${temporary_archive}" "${UV_ENVIRONMENT_ARCHIVE}"
-      sync
-      sleep 6
-    fi
+- run: uv run --no-sync pytest
 ```
 
+`setup-uv-cache` installs uv and the requested Python version, restores a warm archive when one
+exists, runs `uv sync`, and atomically publishes the environment after a cold sync. It accepts
+`working-directory`, `lockfile`, and `cache-version` inputs for monorepos and manual invalidation.
+Its `state`, `key`, `restore-duration-ms`, `sync-duration-ms`, and `publish-duration-ms` outputs are
+also written to the job summary. Pin the action to a release tag or full commit in production
+instead of tracking `main`.
+
 The archive key separates incompatible operating systems, CPU architectures, exact Python versions,
-jobs, Git refs, and lockfiles. The local restore path is stable across runner sandboxes so virtual
-environment script paths remain valid. The concurrency group serializes workflows for the same ref,
-and the archive is published with an atomic rename so another run never restores a partial file.
-Different refs get separate archives even when they use the same lockfile.
+jobs, Git refs, working directories, and lockfiles. The local restore path is stable across runner
+sandboxes so virtual environment script paths remain valid. The concurrency group serializes
+workflows for the same ref, and the archive is published with an atomic rename so another run never
+restores a partial file. Different refs get separate archives even when they use the same lockfile.
 
 This layout avoids both cross-filesystem package installation and Python's small-file reads over
 FUSE. It also presents the Cloud Volume autosave engine with one sequential archive instead of
@@ -373,31 +345,25 @@ Give each compatible build family its own cache namespace:
     cache: false
 
 # Install sccache with your preferred pinned action, package, or runner image.
-- name: Configure persistent Rust caches
-  shell: bash
-  env:
-    CACHE_NAMESPACE: rust-workspace-v1
-  run: |
-    platform="${RUNNER_OS}-${RUNNER_ARCH}"
-    cargo_home="${TENSORLAKE_CACHE_DIR}/cargo-home/${platform}"
-    sccache_dir="${TENSORLAKE_CACHE_DIR}/sccache/${platform}/${CACHE_NAMESPACE}"
-    mkdir -p "${cargo_home}" "${sccache_dir}"
-    echo "CARGO_HOME=${cargo_home}" >> "${GITHUB_ENV}"
-    echo "SCCACHE_DIR=${sccache_dir}" >> "${GITHUB_ENV}"
-    echo "SCCACHE_CACHE_SIZE=50G" >> "${GITHUB_ENV}"
-    echo "SCCACHE_BASEDIRS=${GITHUB_WORKSPACE}" >> "${GITHUB_ENV}"
-    echo "RUSTC_WRAPPER=sccache" >> "${GITHUB_ENV}"
+
+- name: Set up persistent Rust caches
+  id: rust-cache
+  uses: tensorlakeai/tensorlake-github-runners/actions/setup-rust-cache@main
+  with:
+    cache-namespace: rust-workspace-v1
+    disable-incremental: "true"
 
 - name: Build
   run: |
-    sccache --start-server
     cargo build --locked --workspace
     sccache --show-stats
-
-- name: Stop sccache
-  if: always()
-  run: sccache --stop-server || true
 ```
+
+`setup-rust-cache` configures a filesystem-safe cache tree for the requested namespace and exports
+`CARGO_HOME`, `SCCACHE_DIR`, `SCCACHE_CACHE_SIZE`, `SCCACHE_BASEDIRS`, and `RUSTC_WRAPPER`.
+Toolchain and sccache installation stay under workflow control. Set `cache-sccache: "false"` when
+sccache is unavailable, and use `sccache-cache-size` to change the default `50G` limit. The action
+does not need to start the sccache server explicitly; the first wrapped compilation starts it.
 
 Persisting `CARGO_HOME` reuses registry downloads, Git dependencies, and installed Cargo tools.
 Authenticate private registries with environment variables; do not run `cargo login` against the
@@ -410,15 +376,12 @@ Some release builds benefit from reusing the complete `target` directory. Give e
 build family an explicit versioned namespace:
 
 ```yaml
-- name: Select Cargo target cache
-  shell: bash
-  env:
+- name: Set up persistent Rust caches
+  uses: tensorlakeai/tensorlake-github-runners/actions/setup-rust-cache@main
+  with:
     # Include the runtime ABI, Rust target, profile, and a manual version bump.
-    CACHE_NAMESPACE: rust-release-glibc-2.35-x86_64-unknown-linux-gnu-v2
-  run: |
-    target_dir="${TENSORLAKE_CACHE_DIR}/cargo-target/${CACHE_NAMESPACE}"
-    mkdir -p "${target_dir}"
-    echo "CARGO_TARGET_DIR=${target_dir}" >> "${GITHUB_ENV}"
+    cache-namespace: rust-release-glibc-2.35-x86_64-unknown-linux-gnu-v2
+    cache-target: "true"
 
 - run: cargo build --locked --release --target x86_64-unknown-linux-gnu
 ```
