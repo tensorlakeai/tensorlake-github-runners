@@ -33,7 +33,7 @@ from github_runner_orchestrator.webhook import (
 app_image = Image(
     name="github-runner-orchestrator",
     base_image="ghcr.io/astral-sh/uv:python3.11-bookworm-slim",
-).run("uv pip install --system 'PyJWT[crypto]>=2.8.0' requests 'tensorlake>=0.5.92'")
+).run("uv pip install --system 'PyJWT[crypto]>=2.8.0' requests 'tensorlake>=0.5.95'")
 logger = Logger.get_logger(module="github_runner_orchestrator")
 
 REQUIRED_RUNNER_LABEL = "tensorlake"
