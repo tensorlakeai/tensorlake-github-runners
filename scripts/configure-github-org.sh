@@ -466,7 +466,7 @@ resume_from_step_6() {
   printf '  Organization: %s\n' "${github_org}"
   printf '  Organization webhook URL: %s\n' "${endpoint_url}"
   printf '  Cache: one Tensorlake Cloud Volume is created lazily per GitHub repository\n'
-  printf '  Runner labels: self-hosted, tensorlake, and optionally tensorlake-small, tensorlake-medium, or tensorlake-large\n'
+  printf '  Runner labels: self-hosted, tensorlake, and optionally tensorlake-small, tensorlake-medium, tensorlake-large, or tensorlake-xlarge\n'
 }
 
 main() {
@@ -595,7 +595,7 @@ PY
   printf '  Organization webhook: active for workflow_job events\n'
   printf '  Organization webhook URL: %s\n' "${endpoint_url}"
   printf '  Cache: one Tensorlake Cloud Volume is created lazily per GitHub repository\n'
-  printf '  Runner labels: self-hosted, tensorlake, and optionally tensorlake-small, tensorlake-medium, or tensorlake-large\n'
+  printf '  Runner labels: self-hosted, tensorlake, and optionally tensorlake-small, tensorlake-medium, tensorlake-large, or tensorlake-xlarge\n'
   printf '\nNext step: run a workflow with runs-on: [self-hosted, tensorlake] to verify the installation.\n'
 }
 

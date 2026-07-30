@@ -210,13 +210,15 @@ runs-on: [self-hosted, tensorlake, tensorlake-medium]
 
 | Label | CPUs | Memory | Disk |
 |---|---:|---:|---:|
-| no profile or `tensorlake-small` | 2 | 4 GiB | 50 GiB |
-| `tensorlake-medium` | 4 | 8 GiB | 100 GiB |
-| `tensorlake-large` | 8 | 16 GiB | 200 GiB |
+| no profile or `tensorlake-small` | 2 | 4 GiB | 10 GiB |
+| `tensorlake-medium` | 4 | 8 GiB | 50 GiB |
+| `tensorlake-large` | 8 | 16 GiB | 100 GiB |
+| `tensorlake-xlarge` | 16 | 32 GiB | 100 GiB |
 
 Profiles are defined in `github_runner_orchestrator/resources.py`; edit that mapping to expose
-different sizes. Requests with multiple resource-profile labels are rejected. Docker is installed
-and started for every profile, so workflows do not need a Docker-specific label.
+different sizes. Tensorlake runner disks are capped at 100 GiB. Requests with multiple
+resource-profile labels are rejected. Docker is installed and started for every profile, so
+workflows do not need a Docker-specific label.
 
 ## Persistent Workflow Cache
 
@@ -404,7 +406,7 @@ volume snapshots for disposable cache data.
 
 ## Self-Test Workflow
 
-`.github/workflows/build-reference.yml` runs on a `tensorlake-medium` runner. It points uv at the
+`.github/workflows/build-reference.yml` runs on a `tensorlake-small` runner. It points uv at the
 persistent volume automatically when available and uses the sandbox-local uv cache otherwise. It
 installs and lints the Python project, builds its distribution, validates the setup scripts, runs
 the test suite, and runs Docker's `hello-world` image to verify the runner's Docker daemon. The
