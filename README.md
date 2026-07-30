@@ -276,14 +276,37 @@ that verification.
 The runner deliberately exports only the generic `TENSORLAKE_CACHE_DIR`; it does not set
 tool-specific cache variables. Point `setup-uv` at a child directory with its `cache-local-path`
 input. Its default `enable-cache: auto` mode does not upload a GitHub Actions cache from a
-self-hosted runner:
+self-hosted runner. To avoid copying packages across the Cloud Volume and sandbox file systems,
+put uv's project environment on the volume too:
 
 ```yaml
+concurrency:
+  group: uv-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.11"
+
 - uses: actions/checkout@v6
 
 - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
   with:
     cache-local-path: /mnt/tensorlake-cache/uv
+
+- run: uv python install "${PYTHON_VERSION}"
+
+- name: Configure persistent uv environment
+  shell: bash
+  run: |
+    python_path="$(uv python find "${PYTHON_VERSION}")"
+    python_identity="$("${python_path}" -c 'import platform, sys; print(f"{sys.implementation.name}-{platform.python_version()}")')"
+    lock_hash="$(sha256sum uv.lock | cut -d ' ' -f 1)"
+    scope_hash="$(printf '%s\0%s' "${GITHUB_WORKFLOW}" "${GITHUB_REF}" | sha256sum | cut -c 1-16)"
+    environment_key="${RUNNER_OS}-${RUNNER_ARCH}-${python_identity}/${GITHUB_JOB}-${scope_hash}-${lock_hash}"
+    cache_root="${TENSORLAKE_CACHE_DIR:-/mnt/tensorlake-cache}"
+    environment_dir="${cache_root}/uv-environments/${environment_key}"
+    mkdir -p "$(dirname "${environment_dir}")"
+    echo "UV_PROJECT_ENVIRONMENT=${environment_dir}" >> "${GITHUB_ENV}"
 
 - run: uv sync --locked
 ```
@@ -292,9 +315,18 @@ self-hosted runner:
 the same path is created on the sandbox's ephemeral disk, so a workflow that omits the verification
 step still runs without persistence.
 
-The cache and `.venv` are on different file systems, so uv may copy artifacts instead of
-hard-linking them. The volume still avoids repeated downloads and source builds, but benchmark the
-result for dependency sets dominated by small prebuilt wheels.
+The environment key separates incompatible operating systems, CPU architectures, exact Python
+versions, jobs, Git refs, and lockfiles. The concurrency group serializes workflows for the same
+ref, so two sandboxes do not update that ref's environment at once. Different refs get separate
+directories even when they use the same lockfile. This matters because Cloud Volumes reconcile
+concurrent same-path writes with last-writer-wins semantics rather than distributed file locking.
+
+Because `UV_CACHE_DIR` and `UV_PROJECT_ENVIRONMENT` are on the same mounted file system, uv can link
+cached packages into the environment instead of copying them to the sandbox disk. A later run with
+the same key reuses the synchronized environment. Python then imports packages from the mounted
+volume, so compare both dependency-sync and test execution times for the workload. Remove obsolete
+directories under `${TENSORLAKE_CACHE_DIR}/uv-environments` when their refs or lockfiles are no
+longer needed.
 
 ### Rust, Cargo, and sccache
 
@@ -414,11 +446,12 @@ volume snapshots for disposable cache data.
 
 ## Self-Test Workflow
 
-`.github/workflows/build-reference.yml` runs on a `tensorlake-small` runner. It points uv at the
-persistent volume automatically when available and uses the sandbox-local uv cache otherwise. It
-installs and lints the Python project, builds its distribution, validates the setup scripts, runs
-the test suite, and runs Docker's `hello-world` image to verify the runner's Docker daemon. The
-reusable runner sandbox image still builds through `scripts/build-runner-image.sh`, because
-`tensorlake/ubuntu-systemd` is a Tensorlake registered base rather than a public Docker Hub image.
-Once the organization webhook is configured, pushes to `main`, pull requests, and manual dispatches
-exercise the runner implementation from its own repository.
+`.github/workflows/build-reference.yml` runs on a `tensorlake-small` runner. It places both uv's
+cache and a compatibility-keyed project environment on the persistent volume, and records the
+environment's cold/warm state and `uv sync` duration in the job summary. It installs and lints the
+Python project, builds its distribution, validates the setup scripts, runs the test suite, and runs
+Docker's `hello-world` image to verify the runner's Docker daemon. The reusable runner sandbox image
+still builds through `scripts/build-runner-image.sh`, because `tensorlake/ubuntu-systemd` is a
+Tensorlake registered base rather than a public Docker Hub image. Once the organization webhook is
+configured, pushes to `main`, pull requests, and manual dispatches exercise the runner implementation
+from its own repository.

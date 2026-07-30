@@ -9,10 +9,16 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: build-reference-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: [self-hosted, tensorlake, tensorlake-small]
     timeout-minutes: 30
+    env:
+      REFERENCE_PYTHON_VERSION: "3.11"
 
     steps:
       - name: Check out repository
@@ -36,10 +42,59 @@ jobs:
           cache-local-path: /mnt/tensorlake-cache/uv
 
       - name: Install Python
-        run: uv python install 3.11
+        run: uv python install "${REFERENCE_PYTHON_VERSION}"
+
+      - name: Configure persistent uv environment
+        id: uv-environment
+        shell: bash
+        run: |
+          python_executable="$(uv python find "${REFERENCE_PYTHON_VERSION}")"
+          python_identity="$("${python_executable}" -c 'import platform, sys; print(f"{sys.implementation.name}-{platform.python_version()}")')"
+          lock_hash="$(sha256sum uv.lock | cut -d ' ' -f 1)"
+          scope_hash="$(printf '%s\0%s' "${GITHUB_WORKFLOW}" "${GITHUB_REF}" | sha256sum | cut -c 1-16)"
+          environment_key="${RUNNER_OS}-${RUNNER_ARCH}-${python_identity}/${GITHUB_JOB}-${scope_hash}-${lock_hash}"
+          cache_root="${TENSORLAKE_CACHE_DIR:-/mnt/tensorlake-cache}"
+          environment_dir="${cache_root}/uv-environments/${environment_key}"
+          environment_marker="${environment_dir}.ready"
+
+          if [[ -f "${environment_dir}/pyvenv.cfg" && -f "${environment_marker}" ]]; then
+            environment_state="warm"
+          else
+            environment_state="cold"
+          fi
+
+          mkdir -p "$(dirname "${environment_dir}")"
+          {
+            echo "UV_PROJECT_ENVIRONMENT=${environment_dir}"
+            echo "TENSORLAKE_UV_ENVIRONMENT_KEY=${environment_key}"
+            echo "TENSORLAKE_UV_ENVIRONMENT_MARKER=${environment_marker}"
+            echo "TENSORLAKE_UV_ENVIRONMENT_STATE=${environment_state}"
+          } >> "${GITHUB_ENV}"
+          {
+            echo "key=${environment_key}"
+            echo "state=${environment_state}"
+          } >> "${GITHUB_OUTPUT}"
 
       - name: Install dependencies
-        run: uv sync --locked --all-extras
+        id: uv-sync
+        shell: bash
+        run: |
+          started_ns="$(date +%s%N)"
+          uv sync --locked --all-extras
+          finished_ns="$(date +%s%N)"
+          touch "${TENSORLAKE_UV_ENVIRONMENT_MARKER}"
+          duration_ms="$(( (finished_ns - started_ns) / 1000000 ))"
+          duration_seconds="$(awk -v ms="${duration_ms}" 'BEGIN { printf "%.3f", ms / 1000 }')"
+
+          echo "duration-ms=${duration_ms}" >> "${GITHUB_OUTPUT}"
+          echo "UV_SYNC_TIMING duration_ms=${duration_ms} environment_state=${TENSORLAKE_UV_ENVIRONMENT_STATE} key=${TENSORLAKE_UV_ENVIRONMENT_KEY}"
+          {
+            echo "### Persistent uv environment"
+            echo
+            echo "- State before sync: \`${TENSORLAKE_UV_ENVIRONMENT_STATE}\`"
+            echo "- Sync duration: \`${duration_seconds}s\`"
+            echo "- Key: \`${TENSORLAKE_UV_ENVIRONMENT_KEY}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Build Python package
         run: uv build
@@ -54,7 +109,20 @@ jobs:
         run: bash -n scripts/*.sh
 
       - name: Run tests
-        run: uv run --no-sync pytest -q
+        id: tests
+        shell: bash
+        run: |
+          started_ns="$(date +%s%N)"
+          uv run --no-sync pytest -q
+          finished_ns="$(date +%s%N)"
+          duration_ms="$(( (finished_ns - started_ns) / 1000000 ))"
+          duration_seconds="$(awk -v ms="${duration_ms}" 'BEGIN { printf "%.3f", ms / 1000 }')"
+
+          echo "duration-ms=${duration_ms}" >> "${GITHUB_OUTPUT}"
+          echo "TEST_TIMING duration_ms=${duration_ms} environment_state=${TENSORLAKE_UV_ENVIRONMENT_STATE}"
+          {
+            echo "- Test duration: \`${duration_seconds}s\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Verify Docker
         run: docker run --rm hello-world
