@@ -37,6 +37,8 @@ logger = Logger.get_logger(module="github_runner_orchestrator")
 
 REQUIRED_RUNNER_LABEL = "tensorlake"
 RUNNER_IMAGE = "github-actions-runner"
+RUNNER_USER = "tl-user"
+RUNNER_HOME = f"/home/{RUNNER_USER}"
 RUNNER_TIMEOUT_SECS = 7200
 CACHE_MOUNT_TIMEOUT_SECS = 30
 GITHUB_ORG_OVERRIDE: str | None = None
@@ -66,7 +68,12 @@ def _runner_request_from_dict(data: dict) -> RunnerRequest:
 
 async def _wait_for_docker(sandbox) -> None:
     for _ in range(30):
-        docker_info = await sandbox.run("docker", ["info"], timeout=10)
+        docker_info = await sandbox.run(
+            "docker",
+            ["info"],
+            timeout=10,
+            user=RUNNER_USER,
+        )
         if docker_info.exit_code == 0:
             return
         await asyncio.sleep(1)
@@ -75,7 +82,12 @@ async def _wait_for_docker(sandbox) -> None:
 
 
 async def _settle_cache_writes(sandbox) -> None:
-    sync_result = await sandbox.run("sync", [], timeout=30)
+    sync_result = await sandbox.run(
+        "sync",
+        [],
+        timeout=30,
+        user=RUNNER_USER,
+    )
     if sync_result.exit_code != 0:
         logger.warning(
             "Cache sync command failed",
@@ -91,6 +103,12 @@ async def _mount_cache_filesystem(
     file_system_name: str,
     mount_environment: dict[str, str],
 ) -> None:
+    process_environment = {
+        **mount_environment,
+        "HOME": RUNNER_HOME,
+        "LOGNAME": RUNNER_USER,
+        "USER": RUNNER_USER,
+    }
     await sandbox.start_process(
         "/usr/local/bin/tl",
         [
@@ -100,12 +118,18 @@ async def _mount_cache_filesystem(
             file_system_name,
             CACHE_MOUNT_PATH,
         ],
-        env=mount_environment,
+        env=process_environment,
+        user=RUNNER_USER,
         name="tensorlake-cache-mount",
     )
 
     for _ in range(CACHE_MOUNT_TIMEOUT_SECS):
-        mounted = await sandbox.run("mountpoint", ["-q", CACHE_MOUNT_PATH], timeout=10)
+        mounted = await sandbox.run(
+            "mountpoint",
+            ["-q", CACHE_MOUNT_PATH],
+            timeout=10,
+            user=RUNNER_USER,
+        )
         if mounted.exit_code == 0:
             return
         await asyncio.sleep(1)
@@ -186,6 +210,7 @@ async def run_github_runner(request_data: dict) -> dict:
         cpus=resources.cpus,
         memory_mb=resources.memory_mb,
         disk_mb=resources.disk_mb,
+        runner_user=RUNNER_USER,
     )
 
     cache_mounted = False
@@ -224,7 +249,11 @@ async def run_github_runner(request_data: dict) -> dict:
                     exc_info=True,
                 )
 
-        runner_environment = {"RUNNER_ALLOW_RUNASROOT": "1"}
+        runner_environment = {
+            "HOME": RUNNER_HOME,
+            "LOGNAME": RUNNER_USER,
+            "USER": RUNNER_USER,
+        }
         if cache_mounted:
             runner_environment["TENSORLAKE_CACHE_DIR"] = CACHE_MOUNT_PATH
 
@@ -233,12 +262,14 @@ async def run_github_runner(request_data: dict) -> dict:
             ["--jitconfig", jit.encoded_jit_config],
             env=runner_environment,
             working_dir="/opt/actions-runner",
+            user=RUNNER_USER,
         )
         logger.info(
             "GitHub Actions runner exited",
             repository=request.repository,
             sandbox_id=sandbox.sandbox_id,
             runner_name=runner_name,
+            runner_user=RUNNER_USER,
             exit_code=int(result.exit_code or 0),
             cache_mounted=cache_mounted,
         )

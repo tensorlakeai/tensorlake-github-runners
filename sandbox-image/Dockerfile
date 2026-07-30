@@ -1,7 +1,6 @@
 FROM tensorlake/ubuntu-systemd
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV RUNNER_ALLOW_RUNASROOT=1
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
@@ -10,6 +9,7 @@ RUN apt-get update \
     fuse3 \
     gzip \
     jq \
+    sudo \
     tar \
     util-linux \
   && install -m 0755 -d /etc/apt/keyrings \
@@ -25,13 +25,24 @@ RUN apt-get update \
     docker-ce \
     docker-ce-cli \
     docker-compose-plugin \
-  && systemctl enable containerd.service docker.service \
+  && printf '%s\n' 'tl-user ALL=(ALL:ALL) NOPASSWD:ALL' \
+    > /etc/sudoers.d/tl-user-actions-runner \
+  && chmod 0440 /etc/sudoers.d/tl-user-actions-runner \
+  && visudo -cf /etc/sudoers.d/tl-user-actions-runner \
+  && install -d /etc/systemd/system/docker.socket.d \
+  && printf '%s\n' \
+    '[Socket]' \
+    'SocketGroup=tl-user' \
+    'SocketMode=0660' \
+    > /etc/systemd/system/docker.socket.d/tl-user.conf \
+  && systemctl enable containerd.service docker.service docker.socket \
   && rm -rf /var/lib/apt/lists/*
 
 RUN curl -fsSL https://tensorlake.ai/install -o /tmp/install-tensorlake.sh \
   && sh /tmp/install-tensorlake.sh --system --yes \
   && rm /tmp/install-tensorlake.sh \
-  && tl version
+  && tl version \
+  && install -d -o tl-user -g tl-user /mnt/tensorlake-cache
 
 RUN mkdir -p /opt/actions-runner \
   && cd /opt/actions-runner \
@@ -46,6 +57,7 @@ RUN mkdir -p /opt/actions-runner \
   && curl -fsSL -o actions-runner.tgz \
     "https://github.com/actions/runner/releases/download/${latest}/actions-runner-linux-${runner_arch}-${version}.tar.gz" \
   && tar xzf actions-runner.tgz \
-  && rm actions-runner.tgz
+  && rm actions-runner.tgz \
+  && chown -R tl-user:tl-user /opt/actions-runner
 
 WORKDIR /opt/actions-runner
