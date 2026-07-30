@@ -2,6 +2,7 @@ import asyncio
 from types import SimpleNamespace
 
 import github_runner_orchestrator.app as app_module
+import pytest
 from github_runner_orchestrator.cache import CACHE_MOUNT_PATH
 
 
@@ -21,13 +22,14 @@ class FakeSandbox:
     sandbox_id = "sandbox_1"
 
     def __init__(self) -> None:
-        self.started_processes: list[tuple[str, list[str], dict, str | None, str | None]] = []
+        self.started_processes: list[tuple[str, list[str], dict, str | None, str | None, dict]] = []
         self.run_calls: list[tuple[str, list[str], dict | None, str | None, str | None]] = []
         self.terminated = False
         self.mount_checks = 0
+        self.mount_process_status = "running"
 
-    async def start_process(self, command, args, env, name, user=None):
-        self.started_processes.append((command, args, env, name, user))
+    async def start_process(self, command, args, env, name, restart, user=None):
+        self.started_processes.append((command, args, env, name, user, restart))
         return SimpleNamespace(pid=101)
 
     async def run(
@@ -44,6 +46,17 @@ class FakeSandbox:
             self.mount_checks += 1
             return SimpleNamespace(exit_code=0 if self.mount_checks >= 2 else 1)
         return SimpleNamespace(exit_code=0, stdout="runner output", stderr="")
+
+    async def get_process(self, name):
+        assert name == "tensorlake-cache-mount"
+        return SimpleNamespace(
+            status=self.mount_process_status,
+            exit_code=1 if self.mount_process_status != "running" else None,
+        )
+
+    async def get_stderr(self, name):
+        assert name == "tensorlake-cache-mount"
+        return SimpleNamespace(lines=["mount failed"])
 
     async def terminate(self):
         self.terminated = True
@@ -83,6 +96,7 @@ def test_mount_cache_starts_scoped_foreground_mount_and_waits_until_ready() -> N
             },
             "tensorlake-cache-mount",
             app_module.RUNNER_USER,
+            {"policy": "never"},
         )
     ]
     assert sandbox.mount_checks == 2
@@ -94,18 +108,75 @@ def test_mount_cache_starts_scoped_foreground_mount_and_waits_until_ready() -> N
 
 def test_runner_support_checks_and_cache_sync_use_runner_user(monkeypatch) -> None:
     sandbox = FakeSandbox()
-    monkeypatch.setattr(app_module, "CACHE_SETTLE_SECONDS", 0)
 
     async def exercise_helpers() -> None:
         await app_module._wait_for_docker(sandbox)
-        await app_module._settle_cache_writes(sandbox)
+        await app_module._settle_cache_writes(sandbox, {})
 
     asyncio.run(exercise_helpers())
 
     docker_call = next(call for call in sandbox.run_calls if call[0] == "docker")
     sync_call = next(call for call in sandbox.run_calls if call[0] == "sync")
+    unmount_call = next(call for call in sandbox.run_calls if call[0] == "/usr/local/bin/tl")
     assert docker_call[4] == app_module.RUNNER_USER
     assert sync_call[4] == app_module.RUNNER_USER
+    assert unmount_call[4] == app_module.RUNNER_USER
+
+
+def test_mount_cache_reports_process_failure_immediately() -> None:
+    sandbox = FakeSandbox()
+    sandbox.mount_process_status = "exited"
+
+    with pytest.raises(RuntimeError, match="mount failed"):
+        asyncio.run(
+            app_module._mount_cache_filesystem(
+                sandbox,
+                "github-actions-cache-example",
+                {},
+            )
+        )
+
+
+def test_settle_cache_writes_retries_safe_unmount(monkeypatch) -> None:
+    class SettlingSandbox:
+        def __init__(self) -> None:
+            self.unmount_attempts = 0
+
+        async def run(self, command, args, env=None, timeout=None, user=None):
+            if command == "sync":
+                assert user == app_module.RUNNER_USER
+                return SimpleNamespace(exit_code=0, stdout="", stderr="")
+
+            assert command == "/usr/local/bin/tl"
+            assert args == ["fs", "unmount", CACHE_MOUNT_PATH]
+            assert env == {
+                "TENSORLAKE_GIT_TOKEN": "scoped-token",
+                "HOME": app_module.RUNNER_HOME,
+                "LOGNAME": app_module.RUNNER_USER,
+                "USER": app_module.RUNNER_USER,
+            }
+            assert user == app_module.RUNNER_USER
+            self.unmount_attempts += 1
+            if self.unmount_attempts == 1:
+                return SimpleNamespace(
+                    exit_code=1,
+                    stdout="",
+                    stderr="unsaved work remains",
+                )
+            return SimpleNamespace(exit_code=0, stdout="", stderr="")
+
+    sandbox = SettlingSandbox()
+    monkeypatch.setattr(app_module, "CACHE_UNMOUNT_RETRY_SECONDS", 0)
+    monkeypatch.setattr(app_module, "CACHE_UNMOUNT_MAX_ATTEMPTS", 2)
+
+    asyncio.run(
+        app_module._settle_cache_writes(
+            sandbox,
+            {"TENSORLAKE_GIT_TOKEN": "scoped-token"},
+        )
+    )
+
+    assert sandbox.unmount_attempts == 2
 
 
 def _configure_runner_dependencies(monkeypatch, sandbox, logger, cache_result):
@@ -144,7 +215,7 @@ def _configure_runner_dependencies(monkeypatch, sandbox, logger, cache_result):
     async def wait_for_docker(_sandbox):
         return None
 
-    async def settle_cache_writes(_sandbox):
+    async def settle_cache_writes(_sandbox, _mount_environment):
         return None
 
     monkeypatch.setattr(app_module, "_wait_for_docker", wait_for_docker)

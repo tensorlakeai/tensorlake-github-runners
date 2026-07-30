@@ -223,10 +223,12 @@ workflows do not need a Docker-specific label.
 ## Persistent Workflow Cache
 
 Every GitHub repository gets its own Tensorlake Cloud Volume on its first runner job. The
-application finds or creates the volume with Tensorlake's `FilesystemClient`. The runner image then
-starts `tl fs mount` inside the sandbox at `/mnt/tensorlake-cache`, and the orchestrator exports that
-path to the job as `TENSORLAKE_CACHE_DIR`. Later sandboxes for the same repository mount the same
-volume, while other repositories receive separate volumes.
+application finds or creates the volume with Tensorlake's `FilesystemClient`. Empty volumes are
+initialized with a small `.tensorlake-cache-initialized` marker so they have a generation that can
+be mounted. The runner image then starts `tl fs mount` inside the sandbox at
+`/mnt/tensorlake-cache`, and the orchestrator exports that path to the job as
+`TENSORLAKE_CACHE_DIR`. Later sandboxes for the same repository mount the same volume, while other
+repositories receive separate volumes.
 
 The mount receives a short-lived credential scoped to that one volume. The project API key remains
 inside the orchestrator function and is not passed to the runner sandbox or GitHub workflow.
@@ -259,10 +261,15 @@ repository share this cache security boundary, so do not expose the self-hosted 
 untrusted workflow code.
 
 Cloud Volume writes autosave while the job runs. After the Actions runner exits, the orchestrator
-syncs the sandbox and allows one autosave interval before terminating it. Cache provisioning and
-mounting are best-effort: if Tensorlake cannot prepare the volume, the job still runs without
-`TENSORLAKE_CACHE_DIR`. The application emits structured logs with repository, sandbox, volume,
-stage, and error fields for provisioning or mount failures.
+syncs the sandbox and retries a safe unmount until the filesystem confirms that no unsaved work
+would be lost. Cache provisioning and mounting are best-effort: if Tensorlake cannot prepare the
+volume, the job still runs without `TENSORLAKE_CACHE_DIR`. The application emits structured logs
+with repository, sandbox, volume, stage, and error fields for provisioning or mount failures.
+
+The reference workflow deliberately verifies both `TENSORLAKE_CACHE_DIR` and its mountpoint before
+using the cache. This makes a cache regression fail visibly instead of writing to an identically
+named directory on the sandbox's ephemeral disk. Workflows that prefer best-effort caching can omit
+that verification.
 
 ### uv
 
@@ -282,7 +289,8 @@ self-hosted runner:
 ```
 
 `setup-uv` sets `UV_CACHE_DIR` for the job from this input. If cache provisioning is unavailable,
-the same path is created on the sandbox's ephemeral disk, so the job still runs without persistence.
+the same path is created on the sandbox's ephemeral disk, so a workflow that omits the verification
+step still runs without persistence.
 
 The cache and `.venv` are on different file systems, so uv may copy artifacts instead of
 hard-linking them. The volume still avoids repeated downloads and source builds, but benchmark the

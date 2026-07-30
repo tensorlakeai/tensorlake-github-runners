@@ -5,8 +5,10 @@ import os
 import re
 
 CACHE_FILESYSTEM_NAME_PREFIX = "github-actions-cache"
+CACHE_INITIALIZATION_PATH = ".tensorlake-cache-initialized"
 CACHE_MOUNT_PATH = "/mnt/tensorlake-cache"
-CACHE_SETTLE_SECONDS = 6
+CACHE_UNMOUNT_MAX_ATTEMPTS = 15
+CACHE_UNMOUNT_RETRY_SECONDS = 1
 MAX_FILESYSTEM_NAME_LENGTH = 63
 
 
@@ -25,33 +27,51 @@ def cache_filesystem_name(repository: str) -> str:
 
 
 def ensure_cache_filesystem(repository: str) -> str:
-    """Find or lazily create the Cloud Volume used by one repository."""
+    """Find, create, and initialize the Cloud Volume used by one repository."""
     from tensorlake.filesystem import FilesystemClient
 
     name = cache_filesystem_name(repository)
     client = FilesystemClient()
 
-    def existing_name() -> str | None:
+    def existing_filesystem():
         for file_system in client.list():
             if file_system.name == name:
-                return file_system.name
+                return client.get(name)
         return None
 
-    file_system_name = existing_name()
-    if file_system_name:
-        return file_system_name
+    file_system = existing_filesystem()
+
+    if file_system is None:
+        try:
+            file_system = client.create(name)
+        except Exception:
+            # Concurrent first jobs can race to create the same named Cloud Volume.
+            # Re-read the project before surfacing the creation error.
+            file_system = existing_filesystem()
+            if file_system is None:
+                raise
+
+    _initialize_cache_filesystem(file_system)
+    return file_system.name
+
+
+def _initialize_cache_filesystem(file_system) -> None:
+    """Give an empty filesystem the initial generation required by mounts."""
+    if file_system.status().version_id is not None:
+        return
 
     try:
-        created = client.create(name)
+        file_system.write_file(
+            CACHE_INITIALIZATION_PATH,
+            "Initialized for Tensorlake GitHub Actions runner caches.\n",
+            message="Initialize GitHub Actions runner cache",
+        )
     except Exception:
-        # Concurrent first jobs can race to create the same named Cloud Volume.
-        # Re-read the project before surfacing the creation error.
-        file_system_name = existing_name()
-        if file_system_name:
-            return file_system_name
+        # Concurrent first jobs can both observe an empty filesystem. If the
+        # other job initialized it, the desired postcondition already holds.
+        if file_system.status().version_id is not None:
+            return
         raise
-
-    return created.name
 
 
 def cache_mount_environment(file_system_name: str) -> dict[str, str]:
