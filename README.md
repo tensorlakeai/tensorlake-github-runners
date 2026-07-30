@@ -164,6 +164,21 @@ It also installs the Tensorlake CLI and FUSE support used to mount Cloud Volumes
 for Docker and, when a volume is available, its repository cache mount before invoking
 `/opt/actions-runner/run.sh --jitconfig ...`.
 
+Workflow steps run as `tl-user`, matching GitHub-hosted Linux runners' non-root privilege model.
+The account has passwordless `sudo` and access to the Docker daemon. Use `sudo` explicitly for
+system-level operations:
+
+```yaml
+- name: Install system dependencies
+  run: |
+    sudo apt-get update
+    sudo apt-get install -y protobuf-compiler
+```
+
+The orchestrator explicitly selects `tl-user`; it does not depend on the sandbox image's default
+process user. The Actions work directory and persistent cache mount are owned and mounted by that
+same account.
+
 The initial setup wizard performs this build after storing the secrets and before deploying the
 application. Run it directly only for a manual installation or to rebuild the image:
 

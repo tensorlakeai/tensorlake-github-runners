@@ -21,17 +21,25 @@ class FakeSandbox:
     sandbox_id = "sandbox_1"
 
     def __init__(self) -> None:
-        self.started_processes: list[tuple[str, list[str], dict, str | None]] = []
-        self.run_calls: list[tuple[str, list[str], dict | None, str | None]] = []
+        self.started_processes: list[tuple[str, list[str], dict, str | None, str | None]] = []
+        self.run_calls: list[tuple[str, list[str], dict | None, str | None, str | None]] = []
         self.terminated = False
         self.mount_checks = 0
 
-    async def start_process(self, command, args, env, name):
-        self.started_processes.append((command, args, env, name))
+    async def start_process(self, command, args, env, name, user=None):
+        self.started_processes.append((command, args, env, name, user))
         return SimpleNamespace(pid=101)
 
-    async def run(self, command, args, env=None, working_dir=None, timeout=None):
-        self.run_calls.append((command, args, env, working_dir))
+    async def run(
+        self,
+        command,
+        args,
+        env=None,
+        working_dir=None,
+        timeout=None,
+        user=None,
+    ):
+        self.run_calls.append((command, args, env, working_dir, user))
         if command == "mountpoint":
             self.mount_checks += 1
             return SimpleNamespace(exit_code=0 if self.mount_checks >= 2 else 1)
@@ -67,12 +75,37 @@ def test_mount_cache_starts_scoped_foreground_mount_and_waits_until_ready() -> N
                 "github-actions-cache-example",
                 CACHE_MOUNT_PATH,
             ],
-            mount_environment,
+            {
+                **mount_environment,
+                "HOME": app_module.RUNNER_HOME,
+                "LOGNAME": app_module.RUNNER_USER,
+                "USER": app_module.RUNNER_USER,
+            },
             "tensorlake-cache-mount",
+            app_module.RUNNER_USER,
         )
     ]
     assert sandbox.mount_checks == 2
+    assert all(
+        call[4] == app_module.RUNNER_USER for call in sandbox.run_calls if call[0] == "mountpoint"
+    )
     assert "TENSORLAKE_API_KEY" not in mount_environment
+
+
+def test_runner_support_checks_and_cache_sync_use_runner_user(monkeypatch) -> None:
+    sandbox = FakeSandbox()
+    monkeypatch.setattr(app_module, "CACHE_SETTLE_SECONDS", 0)
+
+    async def exercise_helpers() -> None:
+        await app_module._wait_for_docker(sandbox)
+        await app_module._settle_cache_writes(sandbox)
+
+    asyncio.run(exercise_helpers())
+
+    docker_call = next(call for call in sandbox.run_calls if call[0] == "docker")
+    sync_call = next(call for call in sandbox.run_calls if call[0] == "sync")
+    assert docker_call[4] == app_module.RUNNER_USER
+    assert sync_call[4] == app_module.RUNNER_USER
 
 
 def _configure_runner_dependencies(monkeypatch, sandbox, logger, cache_result):
@@ -151,9 +184,12 @@ def test_runner_exposes_only_generic_cache_root_after_successful_mount(monkeypat
         call for call in sandbox.run_calls if call[0] == "/opt/actions-runner/run.sh"
     )
     assert runner_call[2] == {
-        "RUNNER_ALLOW_RUNASROOT": "1",
+        "HOME": app_module.RUNNER_HOME,
+        "LOGNAME": app_module.RUNNER_USER,
+        "USER": app_module.RUNNER_USER,
         "TENSORLAKE_CACHE_DIR": CACHE_MOUNT_PATH,
     }
+    assert runner_call[4] == app_module.RUNNER_USER
     assert result["cache_filesystem"] == "github-actions-cache-example"
     assert result["cache_mounted"] is True
     assert sandbox.terminated is True
@@ -185,7 +221,12 @@ def test_runner_logs_provisioning_failure_and_continues_without_cache(monkeypatc
     runner_call = next(
         call for call in sandbox.run_calls if call[0] == "/opt/actions-runner/run.sh"
     )
-    assert runner_call[2] == {"RUNNER_ALLOW_RUNASROOT": "1"}
+    assert runner_call[2] == {
+        "HOME": app_module.RUNNER_HOME,
+        "LOGNAME": app_module.RUNNER_USER,
+        "USER": app_module.RUNNER_USER,
+    }
+    assert runner_call[4] == app_module.RUNNER_USER
     assert result["cache_filesystem"] is None
     assert result["cache_mounted"] is False
     assert logger.warning_events == [
