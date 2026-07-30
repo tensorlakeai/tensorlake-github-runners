@@ -305,11 +305,22 @@ env:
     scope_hash="$(printf '%s\0%s' "${GITHUB_WORKFLOW}" "${GITHUB_REF}" | sha256sum | cut -c 1-16)"
     environment_key="${RUNNER_OS}-${RUNNER_ARCH}-${python_identity}/${GITHUB_JOB}-${scope_hash}-${lock_hash}"
     cache_root="${TENSORLAKE_CACHE_DIR:-/mnt/tensorlake-cache}"
-    environment_dir="${cache_root}/uv-environments-v2/${environment_key}"
+    environment_dir="${cache_root}/uv-environments-v3/${environment_key}"
     mkdir -p "$(dirname "${environment_dir}")"
+    if [[ ! -f "${environment_dir}.ready" ]]; then
+      uv venv --clear --python "${python_path}" "${environment_dir}"
+    fi
+    rm -f "${environment_dir}/.gitignore" "${environment_dir}/CACHEDIR.TAG"
     echo "UV_PROJECT_ENVIRONMENT=${environment_dir}" >> "${GITHUB_ENV}"
 
-- run: uv sync --locked
+- name: Synchronize and publish the environment
+  run: |
+    uv sync --locked
+    rm -f "${UV_PROJECT_ENVIRONMENT}/.gitignore" \
+      "${UV_PROJECT_ENVIRONMENT}/CACHEDIR.TAG"
+    printf 'ready\n' > "${UV_PROJECT_ENVIRONMENT}.ready"
+    sync
+    sleep 6
 ```
 
 `setup-uv` sets `UV_CACHE_DIR` for the job from this input. If cache provisioning is unavailable,
@@ -324,13 +335,17 @@ concurrent same-path writes with last-writer-wins semantics rather than distribu
 
 Set `UV_LINK_MODE=copy` when creating a durable environment on a Cloud Volume. Although hardlinks
 work within one live mount, cache-to-environment hardlinks are not materialized as independent files
-when a later sandbox mounts the volume. Copy mode makes the first sync write every environment file
-into the durable timeline. It does not copy packages back to the sandbox disk, and a later run with
-the same key reuses the synchronized environment.
+when a later sandbox mounts the volume. Also remove the `.gitignore` and `CACHEDIR.TAG` files that uv
+creates in a virtual environment: those correctly mark an ordinary local venv as disposable, but
+they exclude its contents from the Cloud Volume's durable timeline. Copy mode then makes the first
+sync write every environment file into that timeline. It does not copy packages back to the sandbox
+disk, and a later run with the same key reuses the synchronized environment. The final `sync` and
+short wait let the ready marker pass through the volume's bounded autosave interval before the job
+can exit.
 
 Python then imports packages from the mounted volume, so compare both dependency-sync and test
 execution times for the workload. Remove obsolete directories under
-`${TENSORLAKE_CACHE_DIR}/uv-environments-v2` when their refs or lockfiles are no longer needed.
+`${TENSORLAKE_CACHE_DIR}/uv-environments-v3` when their refs or lockfiles are no longer needed.
 
 ### Rust, Cargo, and sccache
 

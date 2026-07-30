@@ -55,16 +55,18 @@ jobs:
           scope_hash="$(printf '%s\0%s' "${GITHUB_WORKFLOW}" "${GITHUB_REF}" | sha256sum | cut -c 1-16)"
           environment_key="${RUNNER_OS}-${RUNNER_ARCH}-${python_identity}/${GITHUB_JOB}-${scope_hash}-${lock_hash}"
           cache_root="${TENSORLAKE_CACHE_DIR:-/mnt/tensorlake-cache}"
-          environment_dir="${cache_root}/uv-environments-v2/${environment_key}"
+          environment_dir="${cache_root}/uv-environments-v3/${environment_key}"
           environment_marker="${environment_dir}.ready"
+          mkdir -p "$(dirname "${environment_dir}")"
 
           if [[ -f "${environment_dir}/pyvenv.cfg" && -f "${environment_marker}" ]]; then
             environment_state="warm"
           else
             environment_state="cold"
+            uv venv --clear --python "${python_executable}" "${environment_dir}"
           fi
 
-          mkdir -p "$(dirname "${environment_dir}")"
+          rm -f "${environment_dir}/.gitignore" "${environment_dir}/CACHEDIR.TAG"
           {
             echo "UV_PROJECT_ENVIRONMENT=${environment_dir}"
             echo "TENSORLAKE_UV_ENVIRONMENT_KEY=${environment_key}"
@@ -83,8 +85,12 @@ jobs:
           started_ns="$(date +%s%N)"
           uv sync --locked --all-extras
           finished_ns="$(date +%s%N)"
+          rm -f "${UV_PROJECT_ENVIRONMENT}/.gitignore" \
+            "${UV_PROJECT_ENVIRONMENT}/CACHEDIR.TAG"
           printf '%s\n' "${TENSORLAKE_UV_ENVIRONMENT_KEY}" \
             > "${TENSORLAKE_UV_ENVIRONMENT_MARKER}"
+          sync
+          sleep 6
           duration_ms="$(( (finished_ns - started_ns) / 1000000 ))"
           duration_seconds="$(awk -v ms="${duration_ms}" 'BEGIN { printf "%.3f", ms / 1000 }')"
 
