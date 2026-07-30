@@ -286,6 +286,7 @@ concurrency:
 
 env:
   PYTHON_VERSION: "3.11"
+  UV_LINK_MODE: copy
 
 - uses: actions/checkout@v6
 
@@ -304,7 +305,7 @@ env:
     scope_hash="$(printf '%s\0%s' "${GITHUB_WORKFLOW}" "${GITHUB_REF}" | sha256sum | cut -c 1-16)"
     environment_key="${RUNNER_OS}-${RUNNER_ARCH}-${python_identity}/${GITHUB_JOB}-${scope_hash}-${lock_hash}"
     cache_root="${TENSORLAKE_CACHE_DIR:-/mnt/tensorlake-cache}"
-    environment_dir="${cache_root}/uv-environments/${environment_key}"
+    environment_dir="${cache_root}/uv-environments-v2/${environment_key}"
     mkdir -p "$(dirname "${environment_dir}")"
     echo "UV_PROJECT_ENVIRONMENT=${environment_dir}" >> "${GITHUB_ENV}"
 
@@ -321,12 +322,15 @@ ref, so two sandboxes do not update that ref's environment at once. Different re
 directories even when they use the same lockfile. This matters because Cloud Volumes reconcile
 concurrent same-path writes with last-writer-wins semantics rather than distributed file locking.
 
-Because `UV_CACHE_DIR` and `UV_PROJECT_ENVIRONMENT` are on the same mounted file system, uv can link
-cached packages into the environment instead of copying them to the sandbox disk. A later run with
-the same key reuses the synchronized environment. Python then imports packages from the mounted
-volume, so compare both dependency-sync and test execution times for the workload. Remove obsolete
-directories under `${TENSORLAKE_CACHE_DIR}/uv-environments` when their refs or lockfiles are no
-longer needed.
+Set `UV_LINK_MODE=copy` when creating a durable environment on a Cloud Volume. Although hardlinks
+work within one live mount, cache-to-environment hardlinks are not materialized as independent files
+when a later sandbox mounts the volume. Copy mode makes the first sync write every environment file
+into the durable timeline. It does not copy packages back to the sandbox disk, and a later run with
+the same key reuses the synchronized environment.
+
+Python then imports packages from the mounted volume, so compare both dependency-sync and test
+execution times for the workload. Remove obsolete directories under
+`${TENSORLAKE_CACHE_DIR}/uv-environments-v2` when their refs or lockfiles are no longer needed.
 
 ### Rust, Cargo, and sccache
 
