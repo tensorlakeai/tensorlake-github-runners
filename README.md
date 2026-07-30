@@ -276,8 +276,23 @@ that verification.
 The runner deliberately exports only the generic `TENSORLAKE_CACHE_DIR`; it does not set
 tool-specific cache variables. Point `setup-uv` at a child directory with its `cache-local-path`
 input. Its default `enable-cache: auto` mode does not upload a GitHub Actions cache from a
-self-hosted runner. To avoid copying packages across the Cloud Volume and sandbox file systems,
-put uv's project environment on the volume too:
+self-hosted runner:
+
+```yaml
+- uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+  with:
+    cache-local-path: /mnt/tensorlake-cache/uv
+
+- run: uv sync --locked
+```
+
+The cache and `.venv` are on different file systems, so uv may copy artifacts instead of
+hard-linking them. The volume still avoids repeated downloads and source builds, but benchmark the
+result for dependency sets dominated by small prebuilt wheels.
+
+For a dependency set where those cross-filesystem copies are expensive, keep the live environment
+on the sandbox's local disk and store a compressed, compatibility-keyed environment archive on the
+volume:
 
 ```yaml
 concurrency:
@@ -286,17 +301,16 @@ concurrency:
 
 env:
   PYTHON_VERSION: "3.11"
-  UV_LINK_MODE: copy
 
 - uses: actions/checkout@v6
 
 - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
   with:
-    cache-local-path: /mnt/tensorlake-cache/uv
+    enable-cache: false
 
 - run: uv python install "${PYTHON_VERSION}"
 
-- name: Configure persistent uv environment
+- name: Restore persistent uv environment
   shell: bash
   run: |
     python_path="$(uv python find "${PYTHON_VERSION}")"
@@ -305,44 +319,46 @@ env:
     scope_hash="$(printf '%s\0%s' "${GITHUB_WORKFLOW}" "${GITHUB_REF}" | sha256sum | cut -c 1-16)"
     environment_key="${RUNNER_OS}-${RUNNER_ARCH}-${python_identity}/${GITHUB_JOB}-${scope_hash}-${lock_hash}"
     cache_root="${TENSORLAKE_CACHE_DIR:-/mnt/tensorlake-cache}"
-    environment_dir="${cache_root}/uv-environments-v4/${environment_key}"
-    mkdir -p "$(dirname "${environment_dir}")"
-    if [[ ! -f "${environment_dir}.ready" ]]; then
-      "${python_path}" -m venv --clear --without-pip "${environment_dir}"
+    environment_dir="${RUNNER_TEMP}/uv-environments/${environment_key}"
+    environment_archive="${cache_root}/uv-environment-archives-v1/${environment_key}.tar.gz"
+    mkdir -p "$(dirname "${environment_dir}")" "$(dirname "${environment_archive}")"
+    if [[ -f "${environment_archive}" ]]; then
+      tar -xzf "${environment_archive}" -C "$(dirname "${environment_dir}")"
+      environment_state=warm
+    else
+      environment_state=cold
     fi
-    echo "UV_PROJECT_ENVIRONMENT=${environment_dir}" >> "${GITHUB_ENV}"
+    {
+      echo "UV_PROJECT_ENVIRONMENT=${environment_dir}"
+      echo "UV_ENVIRONMENT_ARCHIVE=${environment_archive}"
+      echo "UV_ENVIRONMENT_STATE=${environment_state}"
+    } >> "${GITHUB_ENV}"
 
-- name: Synchronize and publish the environment
+- name: Synchronize and cache the environment
   run: |
     uv sync --locked
-    printf 'ready\n' > "${UV_PROJECT_ENVIRONMENT}.ready"
-    sync
-    sleep 6
+    if [[ "${UV_ENVIRONMENT_STATE}" == "cold" ]]; then
+      temporary_archive="${UV_ENVIRONMENT_ARCHIVE}.tmp.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}"
+      tar -czf "${temporary_archive}" \
+        -C "$(dirname "${UV_PROJECT_ENVIRONMENT}")" \
+        "$(basename "${UV_PROJECT_ENVIRONMENT}")"
+      mv -f "${temporary_archive}" "${UV_ENVIRONMENT_ARCHIVE}"
+      sync
+      sleep 6
+    fi
 ```
 
-`setup-uv` sets `UV_CACHE_DIR` for the job from this input. If cache provisioning is unavailable,
-the same path is created on the sandbox's ephemeral disk, so a workflow that omits the verification
-step still runs without persistence.
+The archive key separates incompatible operating systems, CPU architectures, exact Python versions,
+jobs, Git refs, and lockfiles. The local restore path is stable across runner sandboxes so virtual
+environment script paths remain valid. The concurrency group serializes workflows for the same ref,
+and the archive is published with an atomic rename so another run never restores a partial file.
+Different refs get separate archives even when they use the same lockfile.
 
-The environment key separates incompatible operating systems, CPU architectures, exact Python
-versions, jobs, Git refs, and lockfiles. The concurrency group serializes workflows for the same
-ref, so two sandboxes do not update that ref's environment at once. Different refs get separate
-directories even when they use the same lockfile. This matters because Cloud Volumes reconcile
-concurrent same-path writes with last-writer-wins semantics rather than distributed file locking.
-
-Set `UV_LINK_MODE=copy` when creating a durable environment on a Cloud Volume. Although hardlinks
-work within one live mount, cache-to-environment hardlinks are not materialized as independent files
-when a later sandbox mounts the volume. Create the environment with Python's standard-library
-`venv --without-pip` rather than `uv venv`: uv marks its generated environments as disposable with
-`.gitignore` and `CACHEDIR.TAG`, which excludes their contents from the Cloud Volume's durable
-timeline. Copy mode then makes the first sync write every environment file into that timeline. It
-does not copy packages back to the sandbox disk, and a later run with the same key reuses the
-synchronized environment. The final `sync` and short wait let the ready marker pass through the
-volume's bounded autosave interval before the job can exit.
-
-Python then imports packages from the mounted volume, so compare both dependency-sync and test
-execution times for the workload. Remove obsolete directories under
-`${TENSORLAKE_CACHE_DIR}/uv-environments-v4` when their refs or lockfiles are no longer needed.
+This layout avoids both cross-filesystem package installation and Python's small-file reads over
+FUSE. It also presents the Cloud Volume autosave engine with one sequential archive instead of
+thousands of independently changing environment files. Remove obsolete archives under
+`${TENSORLAKE_CACHE_DIR}/uv-environment-archives-v1` when their refs or lockfiles are no longer
+needed.
 
 ### Rust, Cargo, and sccache
 
@@ -462,12 +478,13 @@ volume snapshots for disposable cache data.
 
 ## Self-Test Workflow
 
-`.github/workflows/build-reference.yml` runs on a `tensorlake-small` runner. It places both uv's
-cache and a compatibility-keyed project environment on the persistent volume, and records the
-environment's cold/warm state and `uv sync` duration in the job summary. It installs and lints the
-Python project, builds its distribution, validates the setup scripts, runs the test suite, and runs
-Docker's `hello-world` image to verify the runner's Docker daemon. The reusable runner sandbox image
-still builds through `scripts/build-runner-image.sh`, because `tensorlake/ubuntu-systemd` is a
-Tensorlake registered base rather than a public Docker Hub image. Once the organization webhook is
-configured, pushes to `main`, pull requests, and manual dispatches exercise the runner implementation
-from its own repository.
+`.github/workflows/build-reference.yml` runs on a `tensorlake-small` runner. It keeps uv's live
+environment on local sandbox storage and caches a compatibility-keyed compressed environment on the
+persistent volume. The job summary records cold/warm state plus archive restore, `uv sync`, archive
+publish, and test durations. It installs and lints the Python project, builds its distribution,
+validates the setup scripts, runs the test suite, and runs Docker's `hello-world` image to verify the
+runner's Docker daemon. The reusable runner sandbox image still builds through
+`scripts/build-runner-image.sh`, because `tensorlake/ubuntu-systemd` is a Tensorlake registered base
+rather than a public Docker Hub image. Once the organization webhook is configured, pushes to
+`main`, pull requests, and manual dispatches exercise the runner implementation from its own
+repository.
