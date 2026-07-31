@@ -4,13 +4,31 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
+    awscli \
+    binutils \
     build-essential \
     ca-certificates \
+    clang \
     cmake \
     curl \
+    e2fsprogs \
+    file \
     fuse3 \
+    gh \
+    git \
     gzip \
     jq \
+    libclang-dev \
+    libfuse3-dev \
+    libprotobuf-dev \
+    lld \
+    musl-tools \
+    nasm \
+    pipx \
+    protobuf-compiler \
+    python3-pip \
+    python3-pyelftools \
+    rsync \
     sudo \
     tar \
     util-linux \
