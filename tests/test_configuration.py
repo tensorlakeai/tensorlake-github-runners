@@ -48,8 +48,7 @@ def test_readme_explains_the_webhook_and_deployment_order() -> None:
 def test_self_hosted_workflow_builds_on_tensorlake_runner() -> None:
     workflow = Path(".github/workflows/build-reference.yml").read_text()
     assert "runs-on: [self-hosted, tensorlake, tensorlake-small]" in workflow
-    assert "astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2" in workflow
-    assert "uv sync --locked --all-extras" in workflow
+    assert "uses: ./actions/setup-uv-cache" in workflow
     assert "uv build" in workflow
     assert "uv run --no-sync pytest -q" in workflow
     assert "docker run --rm hello-world" in workflow

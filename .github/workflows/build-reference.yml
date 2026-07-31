@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: build-reference-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: [self-hosted, tensorlake, tensorlake-small]
@@ -18,28 +22,12 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Verify persistent cache mount
-        shell: bash
-        run: |
-          if [[ -z "${TENSORLAKE_CACHE_DIR:-}" ]]; then
-            echo "::error::The runner did not provide a persistent cache directory."
-            exit 1
-          fi
-          if ! mountpoint -q "${TENSORLAKE_CACHE_DIR}"; then
-            echo "::error::${TENSORLAKE_CACHE_DIR} is not a mounted Cloud Volume."
-            exit 1
-          fi
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+      - name: Set up cached uv environment
+        id: uv-environment
+        uses: ./actions/setup-uv-cache
         with:
-          cache-local-path: /mnt/tensorlake-cache/uv
-
-      - name: Install Python
-        run: uv python install 3.11
-
-      - name: Install dependencies
-        run: uv sync --locked --all-extras
+          python-version: "3.11"
+          sync-args: --locked --all-extras
 
       - name: Build Python package
         run: uv build
@@ -54,7 +42,20 @@ jobs:
         run: bash -n scripts/*.sh
 
       - name: Run tests
-        run: uv run --no-sync pytest -q
+        id: tests
+        shell: bash
+        run: |
+          started_ns="$(date +%s%N)"
+          uv run --no-sync pytest -q
+          finished_ns="$(date +%s%N)"
+          duration_ms="$(( (finished_ns - started_ns) / 1000000 ))"
+          duration_seconds="$(awk -v ms="${duration_ms}" 'BEGIN { printf "%.3f", ms / 1000 }')"
+
+          echo "duration-ms=${duration_ms}" >> "${GITHUB_OUTPUT}"
+          echo "TEST_TIMING duration_ms=${duration_ms} environment_state=${TENSORLAKE_UV_ENVIRONMENT_STATE}"
+          {
+            echo "- Test duration: \`${duration_seconds}s\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Verify Docker
         run: docker run --rm hello-world

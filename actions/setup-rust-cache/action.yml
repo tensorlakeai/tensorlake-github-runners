@@ -1,0 +1,162 @@
+name: Set up Tensorlake Rust cache
+description: Configure Cargo, sccache, and optional target caches on a Tensorlake Cloud Volume.
+
+inputs:
+  cache-namespace:
+    description: Compatibility namespace shared only by equivalent Rust builds.
+    required: true
+  cache-version:
+    description: Manual cache namespace version used for invalidation.
+    required: false
+    default: v1
+  working-directory:
+    description: Rust workspace directory used to normalize sccache paths.
+    required: false
+    default: .
+  cache-cargo-home:
+    description: Persist CARGO_HOME for registry downloads, Git dependencies, and installed tools.
+    required: false
+    default: "true"
+  cache-sccache:
+    description: Configure SCCACHE_DIR and RUSTC_WRAPPER. sccache must already be installed.
+    required: false
+    default: "true"
+  sccache-cache-size:
+    description: Maximum size passed through SCCACHE_CACHE_SIZE.
+    required: false
+    default: 50G
+  cache-target:
+    description: Persist CARGO_TARGET_DIR. Serialize writers and use only with compatible builds.
+    required: false
+    default: "false"
+  disable-incremental:
+    description: Set CARGO_INCREMENTAL=0 so Rust compilations are eligible for sccache.
+    required: false
+    default: "false"
+
+outputs:
+  key:
+    description: Filesystem-safe key derived from the namespace, version, OS, and architecture.
+    value: ${{ steps.configure.outputs.key }}
+  cargo-home:
+    description: Persistent CARGO_HOME, or an empty string when disabled.
+    value: ${{ steps.configure.outputs.cargo_home }}
+  sccache-dir:
+    description: Persistent SCCACHE_DIR, or an empty string when disabled.
+    value: ${{ steps.configure.outputs.sccache_dir }}
+  target-dir:
+    description: Persistent CARGO_TARGET_DIR, or an empty string when disabled.
+    value: ${{ steps.configure.outputs.target_dir }}
+
+runs:
+  using: composite
+  steps:
+    - name: Configure persistent Rust caches
+      id: configure
+      shell: bash
+      env:
+        INPUT_CACHE_CARGO_HOME: ${{ inputs.cache-cargo-home }}
+        INPUT_CACHE_NAMESPACE: ${{ inputs.cache-namespace }}
+        INPUT_CACHE_SCCACHE: ${{ inputs.cache-sccache }}
+        INPUT_CACHE_TARGET: ${{ inputs.cache-target }}
+        INPUT_CACHE_VERSION: ${{ inputs.cache-version }}
+        INPUT_DISABLE_INCREMENTAL: ${{ inputs.disable-incremental }}
+        INPUT_SCCACHE_CACHE_SIZE: ${{ inputs.sccache-cache-size }}
+        INPUT_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+
+        if [[ -z "${TENSORLAKE_CACHE_DIR:-}" ]]; then
+          echo "::error::The runner did not provide TENSORLAKE_CACHE_DIR."
+          exit 1
+        fi
+        if ! mountpoint -q "${TENSORLAKE_CACHE_DIR}"; then
+          echo "::error::${TENSORLAKE_CACHE_DIR} is not a mounted Tensorlake Cloud Volume."
+          exit 1
+        fi
+        if [[ ! "${INPUT_CACHE_VERSION}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+          echo "::error::cache-version may contain only letters, numbers, dots, underscores, and hyphens."
+          exit 1
+        fi
+
+        for value in \
+          "${INPUT_CACHE_CARGO_HOME}" \
+          "${INPUT_CACHE_SCCACHE}" \
+          "${INPUT_CACHE_TARGET}" \
+          "${INPUT_DISABLE_INCREMENTAL}"; do
+          if [[ "${value}" != "true" && "${value}" != "false" ]]; then
+            echo "::error::Boolean inputs must be either true or false."
+            exit 1
+          fi
+        done
+
+        if [[ "${INPUT_WORKING_DIRECTORY}" = /* ]]; then
+          working_directory="${INPUT_WORKING_DIRECTORY}"
+        else
+          working_directory="${GITHUB_WORKSPACE}/${INPUT_WORKING_DIRECTORY}"
+        fi
+        if [[ ! -d "${working_directory}" ]]; then
+          echo "::error::Working directory does not exist: ${working_directory}"
+          exit 1
+        fi
+        working_directory="$(cd "${working_directory}" && pwd -P)"
+
+        namespace_slug="$(printf '%s' "${INPUT_CACHE_NAMESPACE}" \
+          | tr '[:upper:]' '[:lower:]' \
+          | sed -E 's/[^a-z0-9._-]+/-/g; s/^-+//; s/-+$//' \
+          | cut -c 1-48)"
+        namespace_slug="${namespace_slug:-rust-cache}"
+        namespace_hash="$(printf '%s\0%s' "${INPUT_CACHE_VERSION}" "${INPUT_CACHE_NAMESPACE}" | sha256sum | cut -c 1-12)"
+        cache_key="${namespace_slug}-${namespace_hash}"
+        platform="${RUNNER_OS}-${RUNNER_ARCH}"
+        cache_root="${TENSORLAKE_CACHE_DIR}/rust-cache-${INPUT_CACHE_VERSION}/${platform}/${cache_key}"
+        cargo_home=""
+        sccache_dir=""
+        target_dir=""
+
+        if [[ "${INPUT_CACHE_CARGO_HOME}" == "true" ]]; then
+          cargo_home="${cache_root}/cargo-home"
+          mkdir -p "${cargo_home}"
+          echo "CARGO_HOME=${cargo_home}" >> "${GITHUB_ENV}"
+        fi
+
+        if [[ "${INPUT_CACHE_SCCACHE}" == "true" ]]; then
+          if ! command -v sccache >/dev/null 2>&1; then
+            echo "::error::cache-sccache is enabled but sccache is not installed."
+            exit 1
+          fi
+          sccache_dir="${cache_root}/sccache"
+          mkdir -p "${sccache_dir}"
+          {
+            echo "SCCACHE_DIR=${sccache_dir}"
+            echo "SCCACHE_CACHE_SIZE=${INPUT_SCCACHE_CACHE_SIZE}"
+            echo "SCCACHE_BASEDIRS=${working_directory}"
+            echo "RUSTC_WRAPPER=sccache"
+          } >> "${GITHUB_ENV}"
+        fi
+
+        if [[ "${INPUT_CACHE_TARGET}" == "true" ]]; then
+          target_dir="${cache_root}/target"
+          mkdir -p "${target_dir}"
+          echo "CARGO_TARGET_DIR=${target_dir}" >> "${GITHUB_ENV}"
+        fi
+
+        if [[ "${INPUT_DISABLE_INCREMENTAL}" == "true" ]]; then
+          echo "CARGO_INCREMENTAL=0" >> "${GITHUB_ENV}"
+        fi
+
+        {
+          echo "key=${cache_key}"
+          echo "cargo_home=${cargo_home}"
+          echo "sccache_dir=${sccache_dir}"
+          echo "target_dir=${target_dir}"
+        } >> "${GITHUB_OUTPUT}"
+
+        {
+          echo "### Tensorlake Rust cache"
+          echo
+          echo "- Key: \`${cache_key}\`"
+          echo "- Cargo home: \`${cargo_home:-disabled}\`"
+          echo "- sccache: \`${sccache_dir:-disabled}\`"
+          echo "- Cargo target: \`${target_dir:-disabled}\`"
+        } >> "${GITHUB_STEP_SUMMARY}"

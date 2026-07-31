@@ -1,0 +1,184 @@
+name: Set up Tensorlake uv cache
+description: Restore, synchronize, and persist a uv environment with a Tensorlake Cloud Volume.
+
+inputs:
+  python-version:
+    description: Python version passed to uv python install and uv python find.
+    required: true
+  sync-args:
+    description: Whitespace-separated arguments passed to uv sync.
+    required: false
+    default: --locked
+  working-directory:
+    description: Project directory containing the uv lockfile.
+    required: false
+    default: .
+  lockfile:
+    description: Lockfile path relative to the working directory.
+    required: false
+    default: uv.lock
+  cache-version:
+    description: Manual cache namespace version used for invalidation.
+    required: false
+    default: v1
+
+outputs:
+  state:
+    description: Whether the environment archive was cold or warm.
+    value: ${{ steps.cache.outputs.state }}
+  key:
+    description: Compatibility key for the environment archive.
+    value: ${{ steps.cache.outputs.key }}
+  restore-duration-ms:
+    description: Time spent restoring the environment archive.
+    value: ${{ steps.cache.outputs.restore_duration_ms }}
+  sync-duration-ms:
+    description: Time spent running uv sync.
+    value: ${{ steps.cache.outputs.sync_duration_ms }}
+  publish-duration-ms:
+    description: Time spent creating and settling a cold environment archive.
+    value: ${{ steps.cache.outputs.publish_duration_ms }}
+
+runs:
+  using: composite
+  steps:
+    - name: Verify persistent cache mount
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [[ -z "${TENSORLAKE_CACHE_DIR:-}" ]]; then
+          echo "::error::The runner did not provide TENSORLAKE_CACHE_DIR."
+          exit 1
+        fi
+        if ! mountpoint -q "${TENSORLAKE_CACHE_DIR}"; then
+          echo "::error::${TENSORLAKE_CACHE_DIR} is not a mounted Tensorlake Cloud Volume."
+          exit 1
+        fi
+
+    - name: Set up uv
+      uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+      with:
+        enable-cache: false
+
+    - name: Install Python
+      shell: bash
+      env:
+        INPUT_PYTHON_VERSION: ${{ inputs.python-version }}
+      run: |
+        set -euo pipefail
+        uv python install "${INPUT_PYTHON_VERSION}"
+
+    - name: Restore, synchronize, and persist uv environment
+      id: cache
+      shell: bash
+      env:
+        INPUT_CACHE_VERSION: ${{ inputs.cache-version }}
+        INPUT_LOCKFILE: ${{ inputs.lockfile }}
+        INPUT_PYTHON_VERSION: ${{ inputs.python-version }}
+        INPUT_SYNC_ARGS: ${{ inputs.sync-args }}
+        INPUT_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+
+        if [[ ! "${INPUT_CACHE_VERSION}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+          echo "::error::cache-version may contain only letters, numbers, dots, underscores, and hyphens."
+          exit 1
+        fi
+
+        if [[ "${INPUT_WORKING_DIRECTORY}" = /* ]]; then
+          working_directory="${INPUT_WORKING_DIRECTORY}"
+        else
+          working_directory="${GITHUB_WORKSPACE}/${INPUT_WORKING_DIRECTORY}"
+        fi
+        if [[ ! -d "${working_directory}" ]]; then
+          echo "::error::Working directory does not exist: ${working_directory}"
+          exit 1
+        fi
+        working_directory="$(cd "${working_directory}" && pwd -P)"
+
+        if [[ "${INPUT_LOCKFILE}" = /* ]]; then
+          lockfile_path="${INPUT_LOCKFILE}"
+        else
+          lockfile_path="${working_directory}/${INPUT_LOCKFILE}"
+        fi
+        if [[ ! -f "${lockfile_path}" ]]; then
+          echo "::error::uv lockfile does not exist: ${lockfile_path}"
+          exit 1
+        fi
+
+        cd "${working_directory}"
+        python_executable="$(uv python find "${INPUT_PYTHON_VERSION}")"
+        python_identity="$("${python_executable}" -c 'import platform, sys; print(f"{sys.implementation.name}-{platform.python_version()}")')"
+        lock_hash="$(sha256sum "${lockfile_path}" | cut -d ' ' -f 1)"
+        scope_hash="$(printf '%s\0%s\0%s' "${GITHUB_WORKFLOW}" "${GITHUB_REF}" "${INPUT_WORKING_DIRECTORY}" | sha256sum | cut -c 1-16)"
+        environment_key="${RUNNER_OS}-${RUNNER_ARCH}-${python_identity}/${GITHUB_JOB}-${scope_hash}-${lock_hash}"
+        environment_dir="${RUNNER_TEMP}/tensorlake-uv-environments/${environment_key}"
+        environment_archive="${TENSORLAKE_CACHE_DIR}/uv-environment-archives-${INPUT_CACHE_VERSION}/${environment_key}.tar.gz"
+        restore_duration_ms=0
+        publish_duration_ms=0
+        mkdir -p "$(dirname "${environment_dir}")" "$(dirname "${environment_archive}")"
+
+        if [[ -f "${environment_archive}" ]]; then
+          environment_state="warm"
+          restore_started_ns="$(date +%s%N)"
+          tar -xzf "${environment_archive}" -C "$(dirname "${environment_dir}")"
+          restore_finished_ns="$(date +%s%N)"
+          restore_duration_ms="$(( (restore_finished_ns - restore_started_ns) / 1000000 ))"
+          if [[ ! -f "${environment_dir}/pyvenv.cfg" ]]; then
+            echo "::error::The persistent uv environment archive is invalid."
+            exit 1
+          fi
+        else
+          environment_state="cold"
+        fi
+
+        {
+          echo "UV_PROJECT_ENVIRONMENT=${environment_dir}"
+          echo "TENSORLAKE_UV_ENVIRONMENT_KEY=${environment_key}"
+          echo "TENSORLAKE_UV_ENVIRONMENT_STATE=${environment_state}"
+        } >> "${GITHUB_ENV}"
+        export UV_PROJECT_ENVIRONMENT="${environment_dir}"
+
+        uv_sync_args=()
+        if [[ -n "${INPUT_SYNC_ARGS}" ]]; then
+          read -r -a uv_sync_args <<< "${INPUT_SYNC_ARGS}"
+        fi
+        sync_started_ns="$(date +%s%N)"
+        uv sync "${uv_sync_args[@]}"
+        sync_finished_ns="$(date +%s%N)"
+        sync_duration_ms="$(( (sync_finished_ns - sync_started_ns) / 1000000 ))"
+
+        if [[ "${environment_state}" == "cold" ]]; then
+          publish_started_ns="$(date +%s%N)"
+          temporary_archive="${environment_archive}.tmp.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}"
+          trap 'rm -f "${temporary_archive}"' EXIT
+          tar -czf "${temporary_archive}" \
+            -C "$(dirname "${environment_dir}")" \
+            "$(basename "${environment_dir}")"
+          mv -f "${temporary_archive}" "${environment_archive}"
+          trap - EXIT
+          sync
+          sleep 6
+          publish_finished_ns="$(date +%s%N)"
+          publish_duration_ms="$(( (publish_finished_ns - publish_started_ns) / 1000000 ))"
+        fi
+
+        {
+          echo "state=${environment_state}"
+          echo "key=${environment_key}"
+          echo "restore_duration_ms=${restore_duration_ms}"
+          echo "sync_duration_ms=${sync_duration_ms}"
+          echo "publish_duration_ms=${publish_duration_ms}"
+        } >> "${GITHUB_OUTPUT}"
+
+        echo "UV_SYNC_TIMING duration_ms=${sync_duration_ms} environment_state=${environment_state} key=${environment_key}"
+        echo "UV_ARCHIVE_TIMING restore_duration_ms=${restore_duration_ms} publish_duration_ms=${publish_duration_ms} environment_state=${environment_state}"
+        {
+          echo "### Tensorlake uv environment cache"
+          echo
+          echo "- State: \`${environment_state}\`"
+          echo "- Archive restore: \`${restore_duration_ms}ms\`"
+          echo "- uv sync: \`${sync_duration_ms}ms\`"
+          echo "- Archive publish: \`${publish_duration_ms}ms\`"
+          echo "- Key: \`${environment_key}\`"
+        } >> "${GITHUB_STEP_SUMMARY}"
