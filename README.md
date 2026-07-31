@@ -199,7 +199,7 @@ The Tensorlake application allows unauthenticated invocation for GitHub webhooks
 to send `workflow_job` events directly to the deployed `github_runner_webhook` application endpoint.
 The application receives the exact request bytes as an SDK `HttpBody`, verifies GitHub's HMAC
 signature before accepting work, and reads the case-insensitive, sanitized `Headers` collection
-from Tensorlake's request context. These APIs require `tensorlake>=0.5.95`.
+from Tensorlake's request context. These APIs require `tensorlake>=0.5.97`.
 
 ## Runner Resources
 
