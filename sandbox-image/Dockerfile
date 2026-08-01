@@ -4,15 +4,47 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
+    binutils \
     build-essential \
     ca-certificates \
+    clang \
+    cmake \
     curl \
+    e2fsprogs \
+    file \
     fuse3 \
+    gh \
+    git \
     gzip \
     jq \
+    libclang-dev \
+    libfuse3-dev \
+    libprotobuf-dev \
+    lld \
+    musl-tools \
+    nasm \
+    pipx \
+    protobuf-compiler \
+    python3-pip \
+    python3-pyelftools \
+    rsync \
     sudo \
     tar \
+    unzip \
     util-linux \
+  && architecture="$(dpkg --print-architecture)" \
+  && case "${architecture}" in \
+    amd64) aws_arch="x86_64" ;; \
+    arm64) aws_arch="aarch64" ;; \
+    *) echo "unsupported architecture for AWS CLI: ${architecture}" >&2; exit 2 ;; \
+  esac \
+  && curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${aws_arch}.zip" \
+    -o /tmp/awscliv2.zip \
+  && unzip -q /tmp/awscliv2.zip -d /tmp/awscliv2 \
+  && /tmp/awscliv2/aws/install \
+  && rm -r /tmp/awscliv2 \
+  && rm /tmp/awscliv2.zip \
+  && aws --version \
   && install -m 0755 -d /etc/apt/keyrings \
   && curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc \
   && chmod a+r /etc/apt/keyrings/docker.asc \
