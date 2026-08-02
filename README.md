@@ -1,453 +1,162 @@
 # Tensorlake GitHub Workers
 
-This is a simplified version of
-[`donkersgoed/github-runner-ochestrator`](https://github.com/donkersgoed/github-runner-ochestrator)
-using Tensorlake Orchestrate for scheduling and Tensorlake Sandboxes for ephemeral runner isolation.
+Ephemeral GitHub Actions runners on Tensorlake. An organization `workflow_job` webhook schedules a
+durable Tensorlake function that boots a fresh sandbox from a prebuilt runner image, runs exactly one
+job, and tears the sandbox down. Adapted from
+[`donkersgoed/github-runner-ochestrator`](https://github.com/donkersgoed/github-runner-ochestrator),
+replacing its AWS scheduling layer (API Gateway, Lambda, SQS, CDK) with Tensorlake Orchestrate and
+Sandboxes while keeping the GitHub contract.
 
-The original project uses API Gateway, Lambda, SQS, CDK, SSM, and Lambda MicroVM images. This version
-keeps the GitHub contract and removes the AWS scheduling layer:
-
-1. A GitHub organization webhook sends a `workflow_job` event.
-2. The webhook signature is verified with `GITHUB_WEBHOOK_SECRET`.
-3. Only queued jobs with `REQUIRED_RUNNER_LABEL` are accepted.
-4. An async Tensorlake Application schedules `run_github_runner` as durable work.
-5. `run_github_runner` mints GitHub App credentials, creates a JIT self-hosted runner config,
-   mounts that repository's persistent cache volume, starts a fresh Tensorlake Sandbox from a
-   prebuilt runner image through `AsyncSandbox`, runs exactly one GitHub Actions job, and terminates
-   the sandbox.
+**Flow:** GitHub sends a `workflow_job` event → the webhook signature is verified with
+`GITHUB_WEBHOOK_SECRET` → only `queued` jobs carrying the `tensorlake` label are accepted →
+`run_github_runner` mints GitHub App JIT runner credentials, provisions and mounts the repository's
+cache volume, starts the sandbox, supervises the single job, and terminates the sandbox.
 
 ## Files
 
-- `github_runner_orchestrator/app.py` - Tensorlake application and functions.
-- `github_runner_orchestrator/cache.py` - Per-repository cache volume naming and provisioning.
-- `github_runner_orchestrator/github.py` - GitHub App JWT, installation token, and JIT runner APIs.
-- `github_runner_orchestrator/webhook.py` - HMAC verification and `workflow_job` filtering.
-- `actions/setup-uv-cache/action.yml` - Reusable uv environment archive cache action.
-- `actions/setup-rust-cache/action.yml` - Reusable Cargo, sccache, and target cache action.
-- `sandbox-image/Dockerfile` - Reusable GitHub Actions runner sandbox image built from an OCI base.
-- `uv.lock` - Locked application and development dependency versions.
+- `github_runner_orchestrator/app.py` — Tensorlake application and functions.
+- `github_runner_orchestrator/cache.py` — per-repository cache volume naming and provisioning.
+- `github_runner_orchestrator/github.py` — GitHub App JWT, installation token, and JIT runner APIs.
+- `github_runner_orchestrator/webhook.py` — HMAC verification and `workflow_job` filtering.
+- `github_runner_orchestrator/resources.py` — runner resource profiles.
+- `actions/setup-rust-cache/action.yml`, `actions/setup-uv-cache/action.yml` — reusable cache actions.
+- `sandbox-image/Dockerfile`, `scripts/build-runner-image.sh` — the runner sandbox image.
 
-The Orchestrate functions are `async def` and use Tensorlake async function calls. Blocking GitHub
-REST helpers run via `asyncio.to_thread()`, while sandbox operations use the async Sandbox SDK.
+Orchestrate functions are `async`; blocking GitHub REST calls run via `asyncio.to_thread()`, sandbox
+calls use the async Sandbox SDK.
 
-## Configuration
+## Setup
 
-### Interactive setup
-
-Run the organization setup wizard from the repository root:
+Run the wizard from the repository root:
 
 ```bash
 ./scripts/configure-github-org.sh
 ```
 
-The wizard checks for the GitHub (`gh`) and Tensorlake (`tl`) CLIs and offers to install either one
-when missing. It also installs `uv` when needed, uses it to install Python 3.11, and synchronizes the
-locked project dependencies. It shows all seven installation phases before changing anything and
-explains every manual GitHub step before asking for a value. You need organization-owner access in
-GitHub and a Tensorlake project where you can create secrets, images, and applications.
+It installs the `gh`, `tl`, and `uv` tools as needed, explains each GitHub step, stores the secrets,
+builds the runner image, deploys the application, and creates the organization webhook. You need
+organization-owner access and a Tensorlake project.
 
-#### Why there is no webhook/deployment cycle
+**GitHub App vs. webhook.** Register the GitHub App with **Webhook → Active disabled** and only the
+**Self-hosted runners: Read and write** organization permission — it supplies credentials only. A
+*separate* organization webhook (created after deploy, using the endpoint the deploy returns) delivers
+`workflow_job` events. Both use the same `GITHUB_WEBHOOK_SECRET`.
 
-The GitHub App and the webhook are separate GitHub resources with different responsibilities:
+**Secrets** (set by the wizard, or manually with `tl secrets set`):
+`GITHUB_WEBHOOK_SECRET`, `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_INSTALLATION_ID`,
+`GITHUB_APP_PRIVATE_KEY`, `RUNNER_GROUP_ID` (default `1`), `TENSORLAKE_API_KEY` (project-scoped),
+`TENSORLAKE_ORGANIZATION_ID`, `TENSORLAKE_PROJECT_ID`. Redeploy after changing a secret so the new
+value takes effect. Find the org/project IDs with `tl whoami -o json`.
 
-| Resource | Purpose | When it is configured |
-|---|---|---|
-| GitHub App | Gives the Tensorlake application credentials to create ephemeral organization runners | Before deployment; its own webhook is disabled |
-| Organization webhook | Sends `workflow_job` events to the Tensorlake endpoint | After deployment returns the endpoint URL |
+- **Upgrade:** `git pull --ff-only && ./scripts/configure-github-org.sh --upgrade`.
+- **Resume a stopped deploy** (skips the GitHub App inputs and image rebuild):
+  `./scripts/configure-github-org.sh --resume-from-step-6 <org>`.
 
-When [registering the GitHub App](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app),
-deselect **Webhook → Active**. No webhook URL or webhook secret is entered on the GitHub App. Give
-it only the **Self-hosted runners: Read and write** organization permission, create a private key,
-and install it on the target organization.
+Runner image name, timeout, and required label are plain constants near the top of `app.py`.
 
-The exact installation order is:
-
-1. Install the local tools and sync the locked Python environment.
-2. Authenticate `gh` and `tl`, then confirm the GitHub identity and Tensorlake organization/project.
-3. Create and install the credentials-only GitHub App with its webhook disabled.
-4. Enter a Tensorlake project API key, then store it and the active Tensorlake project context with
-   the GitHub App client ID, installation ID, private key, runner group ID, and a newly generated
-   webhook secret. The deployed runner uses the API key and project context to create sandboxes and
-   per-repository cache volumes. Tensorlake secrets exist at the project level and do not require an
-   application deployment to exist first; see the
-   [secrets documentation](https://docs.tensorlake.ai/applications/secrets).
-5. Build the reusable runner sandbox image.
-6. Deploy the Tensorlake application. The deployment reads the stored secrets and returns a public
-   endpoint URL.
-7. Create a separate organization webhook for `workflow_job` events using that endpoint and the
-   same webhook secret stored in step 4.
-
-The wizard performs all of these steps. The API-key prompt is hidden; for a non-interactive run,
-provide it in `TENSORLAKE_API_KEY`. The wizard writes sensitive values only to
-permission-restricted temporary files, deletes those files when it exits, and never prints the API
-key, private key, or webhook secret.
-
-If setup reaches deployment and stops, resume without repeating the GitHub App inputs or rebuilding
-the runner image:
-
-```bash
-WEBHOOK_SECRET="${WEBHOOK_SECRET:-}" ./scripts/configure-github-org.sh \
-  --resume-from-step-6 your-organization
-```
-
-When `WEBHOOK_SECRET` is still available in the current shell, the resume command reuses it.
-Otherwise it safely rotates the stored webhook secret before deploying, then creates or updates the
-organization webhook with the same new value.
-
-### Upgrade an existing installation
-
-After pulling a newer version of this repository, upgrade the deployed application with:
-
-```bash
-git switch main
-git pull --ff-only
-./scripts/configure-github-org.sh --upgrade
-```
-
-Confirm that `tl whoami` shows the Tensorlake project containing the existing installation. The
-upgrade command syncs the locked Python environment, reuses the stored Tensorlake API key, refreshes
-the organization and project context secrets, rebuilds the runner image, and redeploys the
-application. It does not ask for the GitHub App inputs, rotate the webhook secret, or modify the
-organization webhook. The upgrade prints the deployed endpoint; if it differs from the organization
-webhook URL, run `--resume-from-step-6 your-organization` to update the webhook.
-
-### Manual setup
-
-The wizard is recommended because it creates or updates the matching organization webhook for you.
-For a manual installation, first create and install the GitHub App exactly as described above, then
-store the secrets before deploying:
-
-```bash
-WEBHOOK_SECRET="$(openssl rand -hex 32)"
-
-tl secrets set GITHUB_WEBHOOK_SECRET="${WEBHOOK_SECRET}"
-tl secrets set GITHUB_APP_CLIENT_ID='Iv1...'
-tl secrets set GITHUB_APP_INSTALLATION_ID='12345678'
-tl secrets set GITHUB_APP_PRIVATE_KEY="$(cat private-key.pem)"
-tl secrets set RUNNER_GROUP_ID='1'
-tl secrets set TENSORLAKE_API_KEY='tl_apiKey_...'
-tl secrets set TENSORLAKE_ORGANIZATION_ID='org_...'
-tl secrets set TENSORLAKE_PROJECT_ID='project_...'
-```
-
-Use a project-scoped Tensorlake API key for `TENSORLAKE_API_KEY`; the deployed function uses it to
-create and manage runner sandboxes. Run `tl whoami -o json` to find the organization and project IDs
-for the active CLI context. `RUNNER_GROUP_ID` defaults to `1` if omitted. Keep `WEBHOOK_SECRET` in
-the current shell until the organization webhook is created; do not enter it in the disabled GitHub
-App webhook fields. Tensorlake injects stored secrets when an application is deployed. If you
-change a secret later, redeploy the application so the new value takes effect.
-
-Build the runner image, then use the resumable deployment path to deploy the application and
-configure the organization webhook:
-
-```bash
-./scripts/build-runner-image.sh
-GITHUB_ORG='your-organization'
-WEBHOOK_SECRET="${WEBHOOK_SECRET}" ./scripts/configure-github-org.sh \
-  --resume-from-step-6 "${GITHUB_ORG}"
-```
-
-The resume command uses the repository-root `app.py` deployment entrypoint so the complete
-`github_runner_orchestrator` package is included. It also uses the locked project SDK to deploy,
-retrieves the generated public endpoint, and updates an existing matching webhook instead of
-duplicating it.
-
-The runner image name, timeout, required label, and optional GitHub organization override are
-ordinary constants near the top of `github_runner_orchestrator/app.py`. They are configuration,
-not secrets.
-
-## Build the Runner Image
-
-The runner image is built once from the `tensorlake/ubuntu-systemd` base, then registered as the
-`github-actions-runner` Tensorlake sandbox image. Following the
-[Tensorlake Docker guide](https://docs.tensorlake.ai/sandboxes/docker#install-docker), it installs
-Docker CE from Docker's Ubuntu repository and enables the Docker and containerd systemd services.
-It also installs the Tensorlake CLI and FUSE support used to mount Cloud Volumes. Every runner waits
-for Docker and, when a volume is available, its repository cache mount before invoking
-`/opt/actions-runner/run.sh --jitconfig ...`.
-
-Workflow steps run as `tl-user`, matching GitHub-hosted Linux runners' non-root privilege model.
-The account has passwordless `sudo` and access to the Docker daemon. Use `sudo` explicitly for
-system-level operations:
-
-```yaml
-- name: Install system dependencies
-  run: |
-    sudo apt-get update
-    sudo apt-get install -y protobuf-compiler
-```
-
-The orchestrator explicitly selects `tl-user`; it does not depend on the sandbox image's default
-process user. The Actions work directory and persistent cache mount are owned and mounted by that
-same account.
-
-The initial setup wizard performs this build after storing the secrets and before deploying the
-application. Run it directly only for a manual installation or to rebuild the image:
+## Runner image
 
 ```bash
 ./scripts/build-runner-image.sh
 ```
 
-For a manual or repeat deployment, make sure the required secrets have already been stored, then
-run the resumable deployment command:
+Builds and registers the `github-actions-runner` sandbox image. It is based on **Ubuntu 22.04**
+(imported into the project as `ubuntu-2204-base`; the script imports it if missing) and installs
+systemd — booted as PID 1 so Docker's systemd units start — Docker CE, the `tl` CLI with FUSE
+support, and the GitHub Actions runner, and creates the `tl-user` account.
 
-```bash
-./scripts/configure-github-org.sh --resume-from-step-6 your-organization
-```
+Base the image on an OS whose glibc matches your release ABI target: Ubuntu 22.04 ships glibc 2.35,
+which keeps release binaries within a GLIBC ≤ 2.34 floor. A newer base (e.g. Ubuntu 24.04 / glibc
+2.39) links binaries that fail such a compatibility check.
 
-The Tensorlake application allows unauthenticated invocation for GitHub webhooks. Configure GitHub
-to send `workflow_job` events directly to the deployed `github_runner_webhook` application endpoint.
-The application receives the exact request bytes as an SDK `HttpBody`, verifies GitHub's HMAC
-signature before accepting work, and reads the case-insensitive, sanitized `Headers` collection
-from Tensorlake's request context. These APIs require `tensorlake>=0.5.97`.
-
-## Runner Resources
-
-Use `runs-on: [self-hosted, tensorlake]` to request a sandbox runner. Add one resource-profile label
-to select its CPU, memory, and disk:
+Workflow steps run as `tl-user` (passwordless `sudo`, Docker access), matching GitHub-hosted runners:
 
 ```yaml
-runs-on: [self-hosted, tensorlake, tensorlake-medium]
+- run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 ```
+
+## Runner resources
+
+`runs-on: [self-hosted, tensorlake, <profile>]` selects CPU, memory, and disk:
 
 | Label | CPUs | Memory | Disk |
 |---|---:|---:|---:|
-| no profile or `tensorlake-small` | 2 | 4 GiB | 10 GiB |
+| none or `tensorlake-small` | 2 | 4 GiB | 10 GiB |
 | `tensorlake-medium` | 4 | 8 GiB | 50 GiB |
 | `tensorlake-large` | 8 | 16 GiB | 100 GiB |
 | `tensorlake-xlarge` | 16 | 32 GiB | 100 GiB |
 
-Profiles are defined in `github_runner_orchestrator/resources.py`; edit that mapping to expose
-different sizes. Tensorlake runner disks are capped at 100 GiB. Requests with multiple
-resource-profile labels are rejected. Docker is installed and started for every profile, so
-workflows do not need a Docker-specific label.
+Profiles live in `github_runner_orchestrator/resources.py` (disks capped at 100 GiB). Docker is
+available on every profile. Multiple profile labels are rejected.
 
-## Persistent Workflow Cache
+## Persistent cache
 
-Every GitHub repository gets its own Tensorlake Cloud Volume on its first runner job. The
-application finds or creates the volume with Tensorlake's `FilesystemClient`. Empty volumes are
-initialized with a small `.tensorlake-cache-initialized` marker so they have a generation that can
-be mounted. The runner image then starts `tl fs mount` inside the sandbox at
-`/mnt/tensorlake-cache`, and the orchestrator exports that path to the job as
-`TENSORLAKE_CACHE_DIR`. Later sandboxes for the same repository mount the same volume, while other
-repositories receive separate volumes.
-
-The mount receives a short-lived credential scoped to that one volume. The project API key remains
-inside the orchestrator function and is not passed to the runner sandbox or GitHub workflow.
-
-The cache is a normal writable directory rather than an `actions/cache`-compatible archive
-service. A workflow opts in by pointing a tool's cache directory at a namespaced child directory:
+Each repository gets its own Tensorlake Cloud Volume, mounted by the orchestrator at
+`/mnt/tensorlake-cache` and exported to the job as `TENSORLAKE_CACHE_DIR`. It is a plain writable
+directory (not an `actions/cache` service); point a tool's cache directory at a namespaced child:
 
 ```yaml
-jobs:
-  build:
-    runs-on: [self-hosted, tensorlake, tensorlake-medium]
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Configure a persistent tool cache
-        shell: bash
-        run: |
-          tool_cache="${TENSORLAKE_CACHE_DIR}/my-tool/${RUNNER_OS}-${RUNNER_ARCH}"
-          mkdir -p "${tool_cache}"
-          echo "MY_TOOL_CACHE=${tool_cache}" >> "${GITHUB_ENV}"
-
-      - run: my-tool build
+- run: |
+    d="${TENSORLAKE_CACHE_DIR}/my-tool/${RUNNER_OS}-${RUNNER_ARCH}"
+    mkdir -p "$d"
+    echo "MY_TOOL_CACHE=$d" >> "$GITHUB_ENV"
 ```
 
-Use distinct directories for operating systems, CPU architectures, toolchains, build targets,
-profiles, features, or other inputs that make cached files incompatible. Cache only reproducible,
-disposable data. Never write tokens, package-manager credentials, Docker configuration, signing
-material, or other secrets into the mounted directory. Pull requests and branches in the same
-repository share this cache security boundary, so do not expose the self-hosted runner to
-untrusted workflow code.
+- Namespace by anything that makes cached files incompatible: OS, arch, toolchain, target, profile,
+  and a manual version you can bump.
+- Never write secrets (tokens, registry credentials, signing material) into the volume. Pull requests
+  and branches of a repository share its cache, so do not expose the runner to untrusted code.
+- Writes autosave during the job; the orchestrator syncs and unmounts on exit. Provisioning is
+  best-effort unless a workflow asserts the mount (see below).
+- Cleanup: `tl fs ls` lists the `github-actions-cache-*` volumes; `tl fs rm <name>` deletes one.
 
-Cloud Volume writes autosave while the job runs. After the Actions runner exits, the orchestrator
-syncs the sandbox and retries a safe unmount until the filesystem confirms that no unsaved work
-would be lost. Cache provisioning and mounting are best-effort: if Tensorlake cannot prepare the
-volume, the job still runs without `TENSORLAKE_CACHE_DIR`. The application emits structured logs
-with repository, sandbox, volume, stage, and error fields for provisioning or mount failures.
-
-The reference workflow deliberately verifies both `TENSORLAKE_CACHE_DIR` and its mountpoint before
-using the cache. This makes a cache regression fail visibly instead of writing to an identically
-named directory on the sandbox's ephemeral disk. Workflows that prefer best-effort caching can omit
-that verification.
-
-### uv
-
-The runner deliberately exports only the generic `TENSORLAKE_CACHE_DIR`; it does not set
-tool-specific cache variables. Point `setup-uv` at a child directory with its `cache-local-path`
-input. Its default `enable-cache: auto` mode does not upload a GitHub Actions cache from a
-self-hosted runner:
+Two reusable actions wrap the common cases — see each `action.yml` for inputs:
 
 ```yaml
-- uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+# Rust: persist CARGO_HOME + sccache (keep `target` on local disk for parallel jobs).
+- uses: actions-rust-lang/setup-rust-toolchain@v1
+  with: { cache: false }
+- uses: tensorlakeai/tensorlake-github-runners/actions/setup-rust-cache@main
   with:
-    cache-local-path: /mnt/tensorlake-cache/uv
-
-- run: uv sync --locked
+    cache-namespace: rust-release-glibc-2.35-x86_64-unknown-linux-gnu-v2
+    disable-incremental: "true"
+- run: cargo build --locked --release
 ```
 
-The cache and `.venv` are on different file systems, so uv may copy artifacts instead of
-hard-linking them. The volume still avoids repeated downloads and source builds, but benchmark the
-result for dependency sets dominated by small prebuilt wheels.
-
-For a dependency set where those cross-filesystem copies are expensive, keep the live environment
-on the sandbox's local disk and store a compressed, compatibility-keyed environment archive on the
-volume with the repository's composite action:
-
 ```yaml
-concurrency:
-  group: uv-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
-
-- uses: actions/checkout@v6
-
-- name: Set up cached uv environment
-  id: uv-cache
-  uses: tensorlakeai/tensorlake-github-runners/actions/setup-uv-cache@main
-  with:
-    python-version: "3.11"
-    sync-args: --locked --all-extras
-
+# uv: store a compatibility-keyed compressed environment archive (avoids small-file reads over FUSE).
+- uses: tensorlakeai/tensorlake-github-runners/actions/setup-uv-cache@main
+  with: { python-version: "3.11", sync-args: --locked }
 - run: uv run --no-sync pytest
 ```
 
-`setup-uv-cache` installs uv and the requested Python version, restores a warm archive when one
-exists, runs `uv sync`, and atomically publishes the environment after a cold sync. It accepts
-`working-directory`, `lockfile`, and `cache-version` inputs for monorepos and manual invalidation.
-Its `state`, `key`, `restore-duration-ms`, `sync-duration-ms`, and `publish-duration-ms` outputs are
-also written to the job summary. Pin the action to a release tag or full commit in production
-instead of tracking `main`.
-
-The archive key separates incompatible operating systems, CPU architectures, exact Python versions,
-jobs, Git refs, working directories, and lockfiles. The local restore path is stable across runner
-sandboxes so virtual environment script paths remain valid. The concurrency group serializes
-workflows for the same ref, and the archive is published with an atomic rename so another run never
-restores a partial file. Different refs get separate archives even when they use the same lockfile.
-
-This layout avoids both cross-filesystem package installation and Python's small-file reads over
-FUSE. It also presents the Cloud Volume autosave engine with one sequential archive instead of
-thousands of independently changing environment files. Remove obsolete archives under
-`${TENSORLAKE_CACHE_DIR}/uv-environment-archives-v1` when their refs or lockfiles are no longer
-needed.
-
-### Rust, Cargo, and sccache
-
-For Rust compiler artifacts, prefer sccache over sharing a complete mutable Cargo `target` tree.
-Give each compatible build family its own cache namespace:
+To make a cache regression fail loudly instead of silently writing to ephemeral disk, assert the
+mount before use:
 
 ```yaml
-- uses: actions/checkout@v6
-
-- uses: actions-rust-lang/setup-rust-toolchain@v1
-  with:
-    cache: false
-
-# Install sccache with your preferred pinned action, package, or runner image.
-
-- name: Set up persistent Rust caches
-  id: rust-cache
-  uses: tensorlakeai/tensorlake-github-runners/actions/setup-rust-cache@main
-  with:
-    cache-namespace: rust-workspace-v1
-    disable-incremental: "true"
-
-- name: Build
-  run: |
-    cargo build --locked --workspace
-    sccache --show-stats
+- run: |
+    test -n "${TENSORLAKE_CACHE_DIR}" && mountpoint -q "${TENSORLAKE_CACHE_DIR}" \
+      || { echo "::error::TLFS cache not mounted"; exit 1; }
 ```
 
-`setup-rust-cache` configures a filesystem-safe cache tree for the requested namespace and exports
-`CARGO_HOME`, `SCCACHE_DIR`, `SCCACHE_CACHE_SIZE`, `SCCACHE_BASEDIRS`, and `RUSTC_WRAPPER`.
-Toolchain and sccache installation stay under workflow control. Set `cache-sccache: "false"` when
-sccache is unavailable, and use `sccache-cache-size` to change the default `50G` limit. The action
-does not need to start the sccache server explicitly; the first wrapped compilation starts it.
+## Running long or heavy jobs
 
-Persisting `CARGO_HOME` reuses registry downloads, Git dependencies, and installed Cargo tools.
-Authenticate private registries with environment variables; do not run `cargo login` against the
-persistent `CARGO_HOME`, because it writes credentials. Cloud Volumes reconcile concurrent
-same-path writes with last-writer-wins semantics; local Cargo and sccache locks should therefore not
-be treated as a distributed lock across sandboxes. Use separate namespaces for concurrently running
-job families, or serialize writers to a shared namespace.
+These are the non-obvious requirements for jobs that run for many minutes or do lock-heavy,
+small-file I/O against the cache — keep them if you fork the orchestrator:
 
-Some release builds benefit from reusing the complete `target` directory. Give each ABI-compatible
-build family an explicit versioned namespace:
+- **Supervise, don't stream.** `run_github_runner` launches the runner as a *detached* managed
+  process (`sandbox.start_process`) and polls `sandbox.get_process()` for completion, writing a
+  progress update each poll. The progress updates extend the function's execution timeout so the
+  orchestrator outlives the job. Awaiting a single long-lived `sandbox.run("run.sh")` instead
+  streams the whole job over one connection that drops on long builds — which tears the sandbox down
+  mid-job and surfaces as "runner lost communication".
+- **Mount the cache as root.** The orchestrator mounts via `sudo tl fs mount` so the mount daemon
+  can raise its open-file limit (each open file on the volume pins a descriptor). `tl fs mount` still
+  presents the volume to the invoking `tl-user`. A non-root mount is capped too low and refused.
+- **Match the base-OS glibc to your release target** (see [Runner image](#runner-image)).
 
-```yaml
-- name: Set up persistent Rust caches
-  uses: tensorlakeai/tensorlake-github-runners/actions/setup-rust-cache@main
-  with:
-    # Include the runtime ABI, Rust target, profile, and a manual version bump.
-    cache-namespace: rust-release-glibc-2.35-x86_64-unknown-linux-gnu-v2
-    cache-target: "true"
+## Self-test
 
-- run: cargo build --locked --release --target x86_64-unknown-linux-gnu
-```
-
-Cargo target directories contain mutable incremental state. Do not let incompatible jobs share a
-namespace, and serialize concurrent writers to the same namespace with a GitHub `concurrency`
-group. For broadly parallel checks, use sccache and keep `target` on the sandbox's local disk.
-
-For repositories with several Rust workflows:
-
-- Remove an existing cache action only after pointing the same tool directories at the mounted
-  cache.
-- Set `cache: false` on toolchain setup actions when the mounted volume owns those files.
-- Do not combine the mounted cache with another cache backend for the same directory.
-- Preserve compatibility distinctions such as workspace, runtime ABI, architecture, Rust target,
-  build profile, and a manual cache version.
-- Keep Docker BuildKit `registry` or `gha` cache backends. Do not place `/var/lib/docker` on a
-  Cloud Volume.
-
-### Exact binary caches
-
-For outputs keyed by an immutable source commit, store the completed file under that key and publish
-it with a rename:
-
-```yaml
-- name: Restore or build Firecracker
-  shell: bash
-  run: |
-    source_sha="$(git -C firecracker rev-parse HEAD)"
-    cache_dir="${TENSORLAKE_CACHE_DIR}/binaries/firecracker/${RUNNER_OS}-${RUNNER_ARCH}"
-    cached_binary="${cache_dir}/${source_sha}"
-    output="firecracker/build/cargo_target/x86_64-unknown-linux-musl/release/firecracker"
-    mkdir -p "${cache_dir}" "$(dirname "${output}")"
-
-    if [[ -x "${cached_binary}" ]]; then
-      cp "${cached_binary}" "${output}"
-    else
-      cargo build \
-        --manifest-path firecracker/Cargo.toml \
-        --release \
-        --target x86_64-unknown-linux-musl \
-        -p firecracker
-      temporary="${cached_binary}.tmp.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}"
-      cp "${output}" "${temporary}"
-      chmod +x "${temporary}"
-      mv -f "${temporary}" "${cached_binary}"
-    fi
-```
-
-### Retention and cleanup
-
-Cloud Volumes are mutable shared storage, so GitHub cache eviction rules do not apply. Package
-managers should prune their own caches, and obsolete manually versioned directories should be
-removed explicitly. Use `tl fs ls` to list the generated `github-actions-cache-*` volumes and
-`tl fs rm <name>` to delete a repository cache that is no longer needed. Do not create permanent
-volume snapshots for disposable cache data.
-
-## Self-Test Workflow
-
-`.github/workflows/build-reference.yml` runs on a `tensorlake-small` runner. It keeps uv's live
-environment on local sandbox storage and caches a compatibility-keyed compressed environment on the
-persistent volume. The job summary records cold/warm state plus archive restore, `uv sync`, archive
-publish, and test durations. It installs and lints the Python project, builds its distribution,
-validates the setup scripts, runs the test suite, and runs Docker's `hello-world` image to verify the
-runner's Docker daemon. The reusable runner sandbox image still builds through
-`scripts/build-runner-image.sh`, because `tensorlake/ubuntu-systemd` is a Tensorlake registered base
-rather than a public Docker Hub image. Once the organization webhook is configured, pushes to
-`main`, pull requests, and manual dispatches exercise the runner implementation from its own
-repository.
+`.github/workflows/build-reference.yml` runs on a `tensorlake-small` runner: it lints and builds the
+Python project, runs the tests, exercises the cache actions, and runs Docker's `hello-world` to
+verify the runner's Docker daemon.
