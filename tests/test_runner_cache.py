@@ -5,6 +5,13 @@ import github_runner_orchestrator.app as app_module
 import pytest
 from github_runner_orchestrator.cache import CACHE_MOUNT_PATH
 
+# The mount and unmount run under sudo so the mount daemon can raise its
+# open-file limit; tl still presents the volume to the invoking tl-user.
+PRESERVE_ENV = (
+    "--preserve-env=TENSORLAKE_GIT_TOKEN,TENSORLAKE_GIT_USERNAME,"
+    "TENSORLAKE_PROJECT_ID,TENSORLAKE_API_URL"
+)
+
 
 class FakeLogger:
     def __init__(self) -> None:
@@ -22,14 +29,20 @@ class FakeSandbox:
     sandbox_id = "sandbox_1"
 
     def __init__(self) -> None:
-        self.started_processes: list[tuple[str, list[str], dict, str | None, str | None, dict]] = []
+        self.started_processes: list[tuple] = []
         self.run_calls: list[tuple[str, list[str], dict | None, str | None, str | None]] = []
         self.terminated = False
         self.mount_checks = 0
         self.mount_process_status = "running"
+        # The detached runner process exits immediately in tests so the
+        # supervision loop finishes on its first poll without sleeping.
+        self.runner_process_status = "exited"
+        self.runner_exit_code = 0
 
-    async def start_process(self, command, args, env, name, restart, user=None):
-        self.started_processes.append((command, args, env, name, user, restart))
+    async def start_process(
+        self, command, args, env=None, name=None, restart=None, user=None, working_dir=None
+    ):
+        self.started_processes.append((command, args, env, name, user, restart, working_dir))
         return SimpleNamespace(pid=101)
 
     async def run(
@@ -48,14 +61,17 @@ class FakeSandbox:
         return SimpleNamespace(exit_code=0, stdout="runner output", stderr="")
 
     async def get_process(self, name):
-        assert name == "tensorlake-cache-mount"
-        return SimpleNamespace(
-            status=self.mount_process_status,
-            exit_code=1 if self.mount_process_status != "running" else None,
-        )
+        if name == "tensorlake-cache-mount":
+            return SimpleNamespace(
+                status=self.mount_process_status,
+                exit_code=1 if self.mount_process_status != "running" else None,
+            )
+        return SimpleNamespace(status=self.runner_process_status, exit_code=self.runner_exit_code)
+
+    async def get_stdout(self, name):
+        return SimpleNamespace(lines=["runner stdout"])
 
     async def get_stderr(self, name):
-        assert name == "tensorlake-cache-mount"
         return SimpleNamespace(lines=["mount failed"])
 
     async def terminate(self):
@@ -80,8 +96,10 @@ def test_mount_cache_starts_scoped_foreground_mount_and_waits_until_ready() -> N
 
     assert sandbox.started_processes == [
         (
-            "/usr/local/bin/tl",
+            "sudo",
             [
+                PRESERVE_ENV,
+                "/usr/local/bin/tl",
                 "fs",
                 "mount",
                 "--foreground",
@@ -97,6 +115,7 @@ def test_mount_cache_starts_scoped_foreground_mount_and_waits_until_ready() -> N
             "tensorlake-cache-mount",
             app_module.RUNNER_USER,
             {"policy": "never"},
+            None,
         )
     ]
     assert sandbox.mount_checks == 2
@@ -117,9 +136,11 @@ def test_runner_support_checks_and_cache_sync_use_runner_user(monkeypatch) -> No
 
     docker_call = next(call for call in sandbox.run_calls if call[0] == "docker")
     sync_call = next(call for call in sandbox.run_calls if call[0] == "sync")
-    unmount_call = next(call for call in sandbox.run_calls if call[0] == "/usr/local/bin/tl")
+    # The unmount runs under sudo, mirroring the sudo mount.
+    unmount_call = next(call for call in sandbox.run_calls if call[0] == "sudo")
     assert docker_call[4] == app_module.RUNNER_USER
     assert sync_call[4] == app_module.RUNNER_USER
+    assert unmount_call[1][:4] == [PRESERVE_ENV, "/usr/local/bin/tl", "fs", "unmount"]
     assert unmount_call[4] == app_module.RUNNER_USER
 
 
@@ -147,8 +168,14 @@ def test_settle_cache_writes_retries_safe_unmount(monkeypatch) -> None:
                 assert user == app_module.RUNNER_USER
                 return SimpleNamespace(exit_code=0, stdout="", stderr="")
 
-            assert command == "/usr/local/bin/tl"
-            assert args == ["fs", "unmount", CACHE_MOUNT_PATH]
+            assert command == "sudo"
+            assert args == [
+                PRESERVE_ENV,
+                "/usr/local/bin/tl",
+                "fs",
+                "unmount",
+                CACHE_MOUNT_PATH,
+            ]
             assert env == {
                 "TENSORLAKE_GIT_TOKEN": "scoped-token",
                 "HOME": app_module.RUNNER_HOME,
@@ -193,6 +220,12 @@ def _configure_runner_dependencies(monkeypatch, sandbox, logger, cache_result):
         lambda **_kwargs: SimpleNamespace(encoded_jit_config="jit-config"),
     )
 
+    # The runner is supervised by polling; each poll writes a progress update
+    # via the request context. Provide a no-op context so the supervision loop
+    # runs without a live Tensorlake request.
+    fake_context = SimpleNamespace(progress=SimpleNamespace(update=lambda *a, **k: None))
+    monkeypatch.setattr(app_module.RequestContext, "get", staticmethod(lambda: fake_context))
+
     if isinstance(cache_result, Exception):
 
         def provision_cache(_repository):
@@ -229,6 +262,14 @@ def _configure_runner_dependencies(monkeypatch, sandbox, logger, cache_result):
     monkeypatch.setattr(AsyncSandbox, "create", staticmethod(create_sandbox))
 
 
+def _started_runner(sandbox):
+    return next(
+        process
+        for process in sandbox.started_processes
+        if process[0] == "/opt/actions-runner/run.sh"
+    )
+
+
 def test_runner_exposes_only_generic_cache_root_after_successful_mount(monkeypatch) -> None:
     sandbox = FakeSandbox()
     logger = FakeLogger()
@@ -251,18 +292,19 @@ def test_runner_exposes_only_generic_cache_root_after_successful_mount(monkeypat
         )
     )
 
-    runner_call = next(
-        call for call in sandbox.run_calls if call[0] == "/opt/actions-runner/run.sh"
-    )
-    assert runner_call[2] == {
+    runner_process = _started_runner(sandbox)
+    # (command, args, env, name, user, restart, working_dir)
+    assert runner_process[2] == {
         "HOME": app_module.RUNNER_HOME,
         "LOGNAME": app_module.RUNNER_USER,
         "USER": app_module.RUNNER_USER,
         "TENSORLAKE_CACHE_DIR": CACHE_MOUNT_PATH,
     }
-    assert runner_call[4] == app_module.RUNNER_USER
+    assert runner_process[3] == app_module.RUNNER_PROCESS_NAME
+    assert runner_process[4] == app_module.RUNNER_USER
     assert result["cache_filesystem"] == "github-actions-cache-example"
     assert result["cache_mounted"] is True
+    assert result["exit_code"] == 0
     assert sandbox.terminated is True
     assert logger.warning_events == []
 
@@ -289,15 +331,13 @@ def test_runner_logs_provisioning_failure_and_continues_without_cache(monkeypatc
         )
     )
 
-    runner_call = next(
-        call for call in sandbox.run_calls if call[0] == "/opt/actions-runner/run.sh"
-    )
-    assert runner_call[2] == {
+    runner_process = _started_runner(sandbox)
+    assert runner_process[2] == {
         "HOME": app_module.RUNNER_HOME,
         "LOGNAME": app_module.RUNNER_USER,
         "USER": app_module.RUNNER_USER,
     }
-    assert runner_call[4] == app_module.RUNNER_USER
+    assert runner_process[4] == app_module.RUNNER_USER
     assert result["cache_filesystem"] is None
     assert result["cache_mounted"] is False
     assert logger.warning_events == [

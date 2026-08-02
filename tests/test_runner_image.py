@@ -3,7 +3,7 @@ from pathlib import Path
 
 def test_runner_image_uses_oci_base_and_preinstalls_runner() -> None:
     dockerfile = Path("sandbox-image/Dockerfile").read_text()
-    assert dockerfile.startswith("FROM tensorlake/ubuntu-systemd")
+    assert "FROM ubuntu-2204-base" in dockerfile
     assert "actions/runner/releases/latest" in dockerfile
     assert "download.docker.com/linux/ubuntu" in dockerfile
     assert "docker-ce" in dockerfile

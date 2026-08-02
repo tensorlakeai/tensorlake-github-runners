@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 
 from tensorlake.applications import (
     HttpBody,
@@ -43,6 +44,20 @@ RUNNER_HOME = f"/home/{RUNNER_USER}"
 RUNNER_TIMEOUT_SECS = 7200
 CACHE_MOUNT_TIMEOUT_SECS = 30
 GITHUB_ORG_OVERRIDE: str | None = None
+
+# The runner is launched as a detached, managed process and polled, rather than
+# streamed through a single long-lived sandbox.run() for the whole job. A
+# streamed run() drops its connection on long/heavy jobs (compute-engine's
+# dataplane build ran ~9 min before the stream ended and the sandbox was torn
+# down mid-compile). Each poll writes a progress update, which extends this
+# function's execution timeout so the orchestrator outlives the job it supervises.
+RUNNER_PROCESS_NAME = "github-actions-runner-job"
+RUNNER_POLL_INTERVAL_SECS = 15
+# Stop supervising a little before the sandbox TTL so the cache still has time to
+# autosave and unmount, and the sandbox is terminated cleanly.
+RUNNER_SUPERVISION_BUDGET_SECS = RUNNER_TIMEOUT_SECS - 180
+RUNNER_LOG_TAIL_LINES = 40
+RUNNER_LOG_EVERY_N_POLLS = 4
 
 
 def _env_int(name: str, default: int) -> int:
@@ -102,9 +117,18 @@ async def _settle_cache_writes(
 
     last_output = ""
     for attempt in range(CACHE_UNMOUNT_MAX_ATTEMPTS):
+        # Must run via sudo to match the sudo mount above: the mount daemon's
+        # state lives in root's home when mounted as root, so the unmount that
+        # autosaves and detaches has to run as root too.
         unmount_result = await sandbox.run(
-            "/usr/local/bin/tl",
-            ["fs", "unmount", CACHE_MOUNT_PATH],
+            "sudo",
+            [
+                "--preserve-env=TENSORLAKE_GIT_TOKEN,TENSORLAKE_GIT_USERNAME,TENSORLAKE_PROJECT_ID,TENSORLAKE_API_URL",
+                "/usr/local/bin/tl",
+                "fs",
+                "unmount",
+                CACHE_MOUNT_PATH,
+            ],
             env={
                 **mount_environment,
                 "HOME": RUNNER_HOME,
@@ -138,9 +162,18 @@ async def _mount_cache_filesystem(
         "LOGNAME": RUNNER_USER,
         "USER": RUNNER_USER,
     }
+    # Mount via sudo (as root) rather than directly as tl-user. The mount daemon
+    # needs an open-file ceiling well above the sandbox's non-root cap (4096):
+    # every open file on the volume pins a backing descriptor, so tl's mount
+    # refuses to start below ~65k fds, and only a privileged (CAP_SYS_RESOURCE)
+    # process can raise the hard limit that high. Running as root lets it raise
+    # to fs.nr_open; `tl fs mount` still presents the volume to the invoking
+    # SUDO_USER (tl-user), so the workflow retains read/write access.
     await sandbox.start_process(
-        "/usr/local/bin/tl",
+        "sudo",
         [
+            "--preserve-env=TENSORLAKE_GIT_TOKEN,TENSORLAKE_GIT_USERNAME,TENSORLAKE_PROJECT_ID,TENSORLAKE_API_URL",
+            "/usr/local/bin/tl",
             "fs",
             "mount",
             "--foreground",
@@ -304,30 +337,141 @@ async def run_github_runner(request_data: dict) -> dict:
         if cache_mounted:
             runner_environment["TENSORLAKE_CACHE_DIR"] = CACHE_MOUNT_PATH
 
-        result = await sandbox.run(
+        # Launch the runner detached and supervise it by polling, rather than
+        # awaiting a single streamed run() for the whole job (that stream drops
+        # on long builds and its failure would terminate the sandbox mid-job).
+        await sandbox.start_process(
             "/opt/actions-runner/run.sh",
             ["--jitconfig", jit.encoded_jit_config],
             env=runner_environment,
             working_dir="/opt/actions-runner",
             user=RUNNER_USER,
+            name=RUNNER_PROCESS_NAME,
+            restart={"policy": "never"},
         )
+        logger.info(
+            "GitHub Actions runner started (detached)",
+            repository=request.repository,
+            sandbox_id=sandbox.sandbox_id,
+            runner_name=runner_name,
+            runner_user=RUNNER_USER,
+            cache_mounted=cache_mounted,
+        )
+
+        try:
+            request_context = RequestContext.get()
+        except Exception:
+            request_context = None
+            logger.warning(
+                "Request context unavailable; runner supervision cannot extend "
+                "the function timeout via progress updates",
+                sandbox_id=sandbox.sandbox_id,
+            )
+
+        started_at = time.monotonic()
+        poll = 0
+        exit_code: int | None = None
+        process_status = "running"
+        while True:
+            process = await sandbox.get_process(RUNNER_PROCESS_NAME)
+            process_status = getattr(process.status, "value", process.status)
+            elapsed = int(time.monotonic() - started_at)
+            poll += 1
+
+            # Writing a progress update on every poll extends this function's
+            # execution timeout, keeping the orchestrator alive for the whole
+            # duration of the job it is supervising.
+            if request_context is not None:
+                try:
+                    request_context.progress.update(
+                        poll,
+                        poll + 1,
+                        message=(f"runner {runner_name} {process_status} after {elapsed}s"),
+                        attributes={
+                            "sandbox_id": sandbox.sandbox_id,
+                            "runner_name": runner_name,
+                            "status": str(process_status),
+                            "elapsed_secs": str(elapsed),
+                        },
+                    )
+                except Exception as error:
+                    logger.warning(
+                        "Failed to write runner progress update",
+                        sandbox_id=sandbox.sandbox_id,
+                        error_type=type(error).__name__,
+                        error=str(error),
+                    )
+
+            if process_status != "running":
+                exit_code = process.exit_code
+                break
+
+            if elapsed > RUNNER_SUPERVISION_BUDGET_SECS:
+                logger.warning(
+                    "GitHub Actions runner exceeded supervision budget; stopping",
+                    repository=request.repository,
+                    sandbox_id=sandbox.sandbox_id,
+                    runner_name=runner_name,
+                    elapsed_secs=elapsed,
+                )
+                break
+
+            if poll % RUNNER_LOG_EVERY_N_POLLS == 0:
+                try:
+                    stdout = await sandbox.get_stdout(RUNNER_PROCESS_NAME)
+                    tail = "\n".join(stdout.lines[-RUNNER_LOG_TAIL_LINES:])
+                    logger.info(
+                        "GitHub Actions runner progress",
+                        repository=request.repository,
+                        sandbox_id=sandbox.sandbox_id,
+                        runner_name=runner_name,
+                        elapsed_secs=elapsed,
+                        stdout_tail=tail[-4000:],
+                    )
+                except Exception as error:
+                    logger.warning(
+                        "Failed to read runner stdout during poll",
+                        sandbox_id=sandbox.sandbox_id,
+                        error_type=type(error).__name__,
+                        error=str(error),
+                    )
+
+            await asyncio.sleep(RUNNER_POLL_INTERVAL_SECS)
+
+        stdout_tail = ""
+        stderr_tail = ""
+        try:
+            stdout = await sandbox.get_stdout(RUNNER_PROCESS_NAME)
+            stdout_tail = "\n".join(stdout.lines)[-4000:]
+            stderr = await sandbox.get_stderr(RUNNER_PROCESS_NAME)
+            stderr_tail = "\n".join(stderr.lines)[-4000:]
+        except Exception as error:
+            logger.warning(
+                "Failed to read runner output after exit",
+                sandbox_id=sandbox.sandbox_id,
+                error_type=type(error).__name__,
+                error=str(error),
+            )
+
         logger.info(
             "GitHub Actions runner exited",
             repository=request.repository,
             sandbox_id=sandbox.sandbox_id,
             runner_name=runner_name,
             runner_user=RUNNER_USER,
-            exit_code=int(result.exit_code or 0),
+            exit_code=int(exit_code or 0),
+            process_status=process_status,
             cache_mounted=cache_mounted,
         )
         return {
             "sandbox_id": sandbox.sandbox_id,
             "runner_name": runner_name,
-            "exit_code": int(result.exit_code or 0),
+            "exit_code": int(exit_code or 0),
+            "process_status": process_status,
             "cache_filesystem": cache_filesystem_name,
             "cache_mounted": cache_mounted,
-            "stdout_tail": (result.stdout or "")[-4000:],
-            "stderr_tail": (result.stderr or "")[-4000:],
+            "stdout_tail": stdout_tail,
+            "stderr_tail": stderr_tail,
         }
     finally:
         if cache_mounted:

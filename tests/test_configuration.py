@@ -39,10 +39,10 @@ def test_configuration_script_uses_clis_and_configures_org_webhook() -> None:
 
 def test_readme_explains_the_webhook_and_deployment_order() -> None:
     readme = Path("README.md").read_text()
-    assert "Why there is no webhook/deployment cycle" in readme
-    assert "Before deployment; its own webhook is disabled" in readme
-    assert "After deployment returns the endpoint URL" in readme
-    assert "Tensorlake secrets exist at the project level" in readme
+    assert "GitHub App vs. webhook" in readme
+    assert "Webhook → Active disabled" in readme
+    assert "created after deploy, using the endpoint the deploy returns" in readme
+    assert "Redeploy after changing a secret" in readme
 
 
 def test_self_hosted_workflow_builds_on_tensorlake_runner() -> None:
