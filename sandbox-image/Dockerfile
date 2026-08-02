@@ -1,6 +1,22 @@
-FROM tensorlake/ubuntu-systemd
+# Built from a plain ubuntu:22.04 base (imported into Tensorlake as
+# `ubuntu-2204-base`) rather than `tensorlake/ubuntu-systemd`. The dataplane
+# release verifies a GLIBC floor of 2.34 (check_glibc_floor.py); binaries are
+# linked against the build host's glibc, so the runner must build on a host no
+# newer than the target. Ubuntu 24.04 ships glibc 2.39 (fails the floor);
+# Ubuntu 22.04 ships glibc 2.35 and yields <=2.34 symbol requirements, matching
+# the nscloud-ubuntu-22.04 host `main` builds on. Because we no longer inherit a
+# systemd base, this image installs systemd itself and boots it as PID 1
+# (CMD /sbin/init) so Docker's systemd services start, and creates the tl-user
+# account the base used to provide.
+FROM ubuntu-2204-base
 
 ENV DEBIAN_FRONTEND=noninteractive
+
+# The tl-user account (passwordless sudo + Docker access) that the orchestrator
+# selects for every job. Previously supplied by the tensorlake/ubuntu-systemd
+# base; recreate it here since we start from a plain ubuntu image.
+RUN groupadd --gid 1000 tl-user \
+  && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash tl-user
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
@@ -10,6 +26,7 @@ RUN apt-get update \
     clang \
     cmake \
     curl \
+    dbus \
     e2fsprogs \
     file \
     fuse3 \
@@ -24,11 +41,14 @@ RUN apt-get update \
     musl-tools \
     nasm \
     pipx \
+    pkg-config \
     protobuf-compiler \
     python3-pip \
     python3-pyelftools \
     rsync \
     sudo \
+    systemd \
+    systemd-sysv \
     tar \
     unzip \
     util-linux \
@@ -94,3 +114,8 @@ RUN mkdir -p /opt/actions-runner \
   && chown -R tl-user:tl-user /opt/actions-runner
 
 WORKDIR /opt/actions-runner
+
+# Boot systemd as PID 1 so Docker's systemd units start inside the sandbox.
+# The tensorlake/ubuntu-systemd base did this implicitly; a plain ubuntu base
+# defaults its CMD to bash, so set it explicitly.
+CMD ["/sbin/init"]

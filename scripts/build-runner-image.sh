@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# The runner image builds FROM `ubuntu-2204-base`: a plain ubuntu:22.04 imported
+# into this project. Its glibc (2.35) satisfies the dataplane's GLIBC 2.34
+# release floor, whereas the 24.04 tensorlake/ubuntu-systemd base ships glibc
+# 2.39 and fails it. Import the base once if it is not already registered.
+if ! tl sbx image describe ubuntu-2204-base >/dev/null 2>&1; then
+  tl sbx image import ubuntu:22.04 --registered-name ubuntu-2204-base
+fi
+
 tl sbx image create sandbox-image/Dockerfile \
   --registered-name github-actions-runner \
   --cpus "${TENSORLAKE_IMAGE_BUILD_CPUS:-4}" \
