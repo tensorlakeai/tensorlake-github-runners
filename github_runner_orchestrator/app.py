@@ -386,9 +386,7 @@ async def run_github_runner(request_data: dict) -> dict:
                     request_context.progress.update(
                         poll,
                         poll + 1,
-                        message=(
-                            f"runner {runner_name} {process_status} after {elapsed}s"
-                        ),
+                        message=(f"runner {runner_name} {process_status} after {elapsed}s"),
                         attributes={
                             "sandbox_id": sandbox.sandbox_id,
                             "runner_name": runner_name,
