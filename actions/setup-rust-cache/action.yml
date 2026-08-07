@@ -33,6 +33,14 @@ inputs:
     description: Set CARGO_INCREMENTAL=0 so Rust compilations are eligible for sccache.
     required: false
     default: "false"
+  prefetch:
+    description: >-
+      Bulk-prefetch the cache subtree before the job reads it: one
+      segment-grouped warmup instead of lazy per-read faults during the
+      build (measured ~10x faster on large caches with tl >= 0.5.101).
+      Best effort - a failed prefetch never fails the job.
+    required: false
+    default: "true"
 
 outputs:
   key:
@@ -61,6 +69,7 @@ runs:
         INPUT_CACHE_TARGET: ${{ inputs.cache-target }}
         INPUT_CACHE_VERSION: ${{ inputs.cache-version }}
         INPUT_DISABLE_INCREMENTAL: ${{ inputs.disable-incremental }}
+        INPUT_PREFETCH: ${{ inputs.prefetch }}
         INPUT_SCCACHE_CACHE_SIZE: ${{ inputs.sccache-cache-size }}
         INPUT_WORKING_DIRECTORY: ${{ inputs.working-directory }}
       run: |
@@ -83,7 +92,8 @@ runs:
           "${INPUT_CACHE_CARGO_HOME}" \
           "${INPUT_CACHE_SCCACHE}" \
           "${INPUT_CACHE_TARGET}" \
-          "${INPUT_DISABLE_INCREMENTAL}"; do
+          "${INPUT_DISABLE_INCREMENTAL}" \
+          "${INPUT_PREFETCH}"; do
           if [[ "${value}" != "true" && "${value}" != "false" ]]; then
             echo "::error::Boolean inputs must be either true or false."
             exit 1
@@ -145,6 +155,22 @@ runs:
           echo "CARGO_INCREMENTAL=0" >> "${GITHUB_ENV}"
         fi
 
+        prefetch_status="disabled"
+        if [[ "${INPUT_PREFETCH}" == "true" ]]; then
+          # Warm the whole subtree in bulk (segment-grouped fetches) instead
+          # of paying a lazy per-read fault for every file the build touches.
+          # The daemon was mounted by the orchestrator as root, so its
+          # control state lives in root's home - reach it through sudo the
+          # same way the orchestrator's unmount does. Best effort: a failed
+          # or slow-started prefetch must never fail the job.
+          if sudo /usr/local/bin/tl fs prefetch "${cache_root}"; then
+            prefetch_status="completed"
+          else
+            prefetch_status="failed (job falls back to lazy reads)"
+            echo "::warning::Cache prefetch failed; the job will fault cache pages in lazily."
+          fi
+        fi
+
         {
           echo "key=${cache_key}"
           echo "cargo_home=${cargo_home}"
@@ -159,4 +185,5 @@ runs:
           echo "- Cargo home: \`${cargo_home:-disabled}\`"
           echo "- sccache: \`${sccache_dir:-disabled}\`"
           echo "- Cargo target: \`${target_dir:-disabled}\`"
+          echo "- Prefetch: \`${prefetch_status}\`"
         } >> "${GITHUB_STEP_SUMMARY}"
