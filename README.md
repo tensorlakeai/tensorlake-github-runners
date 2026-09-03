@@ -49,6 +49,9 @@ organization-owner access and a Tensorlake project.
 value takes effect. Find the org/project IDs with `tl whoami -o json`.
 
 - **Upgrade:** `git pull --ff-only && ./scripts/configure-github-org.sh --upgrade`.
+  The script defaults to Tensorlake organization `org_T7MwTdFrBRHdpQPWf8Jdh` and project
+  `project_Bn6BzggtncBfqQPFHJC8T`. Set `TENSORLAKE_ORGANIZATION_ID` and
+  `TENSORLAKE_PROJECT_ID` to use a different destination.
 - **Resume a stopped deploy** (skips the GitHub App inputs and image rebuild):
   `./scripts/configure-github-org.sh --resume-from-step-6 <org>`.
 

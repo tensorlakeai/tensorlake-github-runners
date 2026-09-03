@@ -8,6 +8,8 @@ APPLICATION_NAME="github_runner_webhook"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
 
+export TENSORLAKE_ORGANIZATION_ID="${TENSORLAKE_ORGANIZATION_ID:-org_T7MwTdFrBRHdpQPWf8Jdh}"
+export TENSORLAKE_PROJECT_ID="${TENSORLAKE_PROJECT_ID:-project_Bn6BzggtncBfqQPFHJC8T}"
 export PATH="${HOME}/.local/bin:${HOME}/.cargo/bin:${PATH}"
 
 info() {
@@ -160,6 +162,8 @@ ensure_authentication() {
     tl login
   fi
 
+  require_tensorlake_project_context
+
   printf '\nGitHub CLI identity:\n'
   gh auth status --hostname github.com
   printf '\nTensorlake destination:\n'
@@ -176,53 +180,16 @@ ensure_project_environment() {
   uv sync --locked --python 3.11
 }
 
-tensorlake_secret_exists() {
-  local secret_name="$1"
-  local secrets
-  secrets="$(tl secrets ls)"
-  [[ "${secrets}" == *"${secret_name}"* ]]
-}
-
-ensure_tensorlake_api_key_secret() {
-  local tensorlake_api_key="${TENSORLAKE_API_KEY:-}"
-  local api_key_env="${TMP_DIR}/tensorlake-api-key.env"
-
-  if [[ -z "${tensorlake_api_key}" ]] && tensorlake_secret_exists "TENSORLAKE_API_KEY"; then
-    printf 'Reusing the existing TENSORLAKE_API_KEY secret in this Tensorlake project.\n'
-    return
-  fi
-
-  if [[ -z "${tensorlake_api_key}" ]]; then
-    printf '\nThe deployed runner function needs a project API key to create Tensorlake sandboxes.\n'
-    printf 'Create an API key in the Tensorlake project confirmed in step 2, then enter it below.\n'
-    printf 'The input is hidden and will be stored as the TENSORLAKE_API_KEY project secret.\n'
-    prompt_secret_required tensorlake_api_key "Tensorlake project API key"
-  else
-    printf 'Using the Tensorlake API key supplied in TENSORLAKE_API_KEY.\n'
-  fi
-
-  TENSORLAKE_API_KEY="${tensorlake_api_key}" \
-    uv run --no-sync python - "${api_key_env}" <<'PY'
-import os
-import sys
-
-value = os.environ["TENSORLAKE_API_KEY"].replace('"', '\\"')
-with open(sys.argv[1], "w", encoding="utf-8") as output:
-    output.write(f'TENSORLAKE_API_KEY="{value}"\n')
-PY
-  chmod 600 "${api_key_env}"
-  tl secrets set --env-file "${api_key_env}"
-  unset tensorlake_api_key
-  printf 'Stored TENSORLAKE_API_KEY in the active Tensorlake project.\n'
-}
-
-store_tensorlake_project_context_secrets() {
+write_tensorlake_project_context_env() {
+  local context_env="$1"
   local identity_json="${TMP_DIR}/tensorlake-identity.json"
-  local context_env="${TMP_DIR}/tensorlake-context.env"
 
-  tl whoami -o json >"${identity_json}"
+  if ! tl whoami -o json >"${identity_json}"; then
+    return 1
+  fi
   chmod 600 "${identity_json}"
-  uv run --no-sync python - "${identity_json}" "${context_env}" <<'PY'
+
+  if ! uv run --no-sync python - "${identity_json}" "${context_env}" <<'PY'
 import json
 import sys
 
@@ -254,18 +221,72 @@ values = {
     ),
     "TENSORLAKE_PROJECT_ID": find_value(identity, ("projectId", "project_id")),
 }
-missing = [name for name, value in values.items() if not value]
-if missing:
-    raise SystemExit(
-        "Tensorlake identity did not include required project context: "
-        + ", ".join(missing)
-    )
+if not all(values.values()):
+    raise SystemExit(1)
 
 with open(sys.argv[2], "w", encoding="utf-8") as output:
     for name, value in values.items():
         output.write(f'{name}="{value}"\n')
 PY
+  then
+    return 1
+  fi
+
   chmod 600 "${context_env}"
+}
+
+require_tensorlake_project_context() {
+  local context_env="${TMP_DIR}/tensorlake-context.env"
+
+  if ! write_tensorlake_project_context_env "${context_env}"; then
+    die "Tensorlake organization and project are not selected. Run 'tl init' or set TENSORLAKE_ORGANIZATION_ID and TENSORLAKE_PROJECT_ID, then retry."
+  fi
+}
+
+tensorlake_secret_exists() {
+  local secret_name="$1"
+  local secrets
+  secrets="$(tl secrets ls)"
+  [[ "${secrets}" == *"${secret_name}"* ]]
+}
+
+ensure_tensorlake_api_key_secret() {
+  local tensorlake_api_key="${TENSORLAKE_API_KEY:-}"
+  local api_key_env="${TMP_DIR}/tensorlake-api-key.env"
+
+  if [[ -z "${tensorlake_api_key}" ]] && tensorlake_secret_exists "TENSORLAKE_API_KEY"; then
+    printf 'Reusing the existing TENSORLAKE_API_KEY secret in this Tensorlake project.\n'
+    return
+  fi
+
+  if [[ -z "${tensorlake_api_key}" ]]; then
+    printf '\nThe deployed runner function needs a project API key to create Tensorlake sandboxes.\n'
+    printf 'Create an API key in the Tensorlake project confirmed in step 2, then enter it below.\n'
+    printf 'The input is hidden and will be stored as the TENSORLAKE_API_KEY project secret.\n'
+    prompt_secret_required tensorlake_api_key "Tensorlake project API key"
+  else
+    printf 'Using the Tensorlake API key supplied in TENSORLAKE_API_KEY.\n'
+  fi
+
+  export TENSORLAKE_API_KEY="${tensorlake_api_key}"
+  uv run --no-sync python - "${api_key_env}" <<'PY'
+import os
+import sys
+
+value = os.environ["TENSORLAKE_API_KEY"].replace('"', '\\"')
+with open(sys.argv[1], "w", encoding="utf-8") as output:
+    output.write(f'TENSORLAKE_API_KEY="{value}"\n')
+PY
+  chmod 600 "${api_key_env}"
+  tl secrets set --env-file "${api_key_env}"
+  unset tensorlake_api_key
+  printf 'Stored TENSORLAKE_API_KEY in the active Tensorlake project.\n'
+}
+
+store_tensorlake_project_context_secrets() {
+  local context_env="${TMP_DIR}/tensorlake-context.env"
+
+  require_tensorlake_project_context
   tl secrets set --env-file "${context_env}"
   printf 'Stored the active Tensorlake organization and project IDs for cache provisioning.\n'
 }
@@ -392,6 +413,8 @@ upgrade_installation() {
     tl login
   fi
 
+  require_tensorlake_project_context
+
   printf '\nTensorlake destination:\n'
   tl whoami
   printf '\nThe existing application in this project will be redeployed.\n'
@@ -434,6 +457,7 @@ resume_from_step_6() {
     die "GitHub CLI is not authenticated. Run 'gh auth login --hostname github.com' and retry."
   tl whoami >/dev/null 2>&1 || \
     die "Tensorlake CLI is not authenticated. Run 'tl login' and retry."
+  require_tensorlake_project_context
 
   if [[ -z "${github_org}" ]]; then
     prompt_required github_org "GitHub organization"
