@@ -85,7 +85,8 @@ print_usage() {
   printf '  %s\n' "$0"
   printf '  %s --upgrade\n' "$0"
   printf '  %s --resume-from-step-6 [GITHUB_ORG]\n' "$0"
-  printf '\nThe upgrade mode refreshes project context, rebuilds the runner image, and redeploys.\n'
+  printf '\nThe upgrade mode aligns the Python SDK with the CLI.\n'
+  printf 'It refreshes project context, rebuilds the runner image, and redeploys.\n'
   printf 'It leaves the webhook URL and webhook secret unchanged.\n'
   printf 'The resume mode redeploys the application and creates or updates its organization webhook.\n'
   printf 'Set WEBHOOK_SECRET to reuse a known secret; otherwise the mode safely rotates it.\n'
@@ -175,9 +176,24 @@ ensure_authentication() {
 }
 
 ensure_project_environment() {
+  local cli_version
+  local version_output
+
   info "Install Python and sync the reference application dependencies with uv"
   uv python install 3.11
   uv sync --locked --python 3.11
+
+  version_output="$(tl --version)"
+  if [[ "${version_output}" =~ ([0-9]+\.[0-9]+\.[0-9]+([.+-][[:alnum:].-]+)?) ]]; then
+    cli_version="${BASH_REMATCH[1]}"
+  else
+    die "Cannot determine the Tensorlake CLI version from: ${version_output}"
+  fi
+
+  info "Install Python Tensorlake SDK ${cli_version} to match the CLI"
+  uv pip install \
+    --python "${ROOT_DIR}/.venv/bin/python" \
+    "tensorlake==${cli_version}"
 }
 
 write_tensorlake_project_context_env() {

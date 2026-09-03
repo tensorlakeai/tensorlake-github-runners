@@ -25,6 +25,9 @@ if [ "${1:-}" = "run" ]; then
     fi
     exec "$@"
 fi
+if [ "${1:-}" = "pip" ]; then
+    exit 0
+fi
 exit 0
 """,
     )
@@ -94,6 +97,10 @@ def test_upgrade_rejects_an_authenticated_cli_without_project_context(tmp_path: 
     _write_executable(
         fake_bin / "tl",
         """#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+    printf '%s\\n' 'tl 0.5.121'
+    exit 0
+fi
 if [ "${1:-}" = "whoami" ]; then
     if [ "${2:-}" = "-o" ]; then
         printf '%s\\n' '{"personalAccessToken":{"token":"<REDACTED>"}}'
@@ -117,6 +124,10 @@ def test_upgrade_exports_the_prompted_project_api_key(tmp_path: Path) -> None:
     _write_executable(
         fake_bin / "tl",
         """#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+    printf '%s\\n' 'tl 0.5.121'
+    exit 0
+fi
 case "${1:-}" in
   whoami)
     if [ "${2:-}" = "-o" ]; then
@@ -157,6 +168,86 @@ exit 64
     assert "Upgrade complete." in result.stdout
     assert "tl_project_key_test" not in result.stdout
     assert "tl_project_key_test" not in result.stderr
+
+
+def test_upgrade_aligns_the_python_sdk_with_the_cli_version(tmp_path: Path) -> None:
+    fake_bin, environment = _upgrade_test_environment(tmp_path)
+    sdk_version_file = tmp_path / "sdk-version"
+    environment["FAKE_SDK_VERSION_FILE"] = str(sdk_version_file)
+    environment["TENSORLAKE_API_KEY"] = "tl_project_key_test"
+
+    _write_executable(
+        fake_bin / "uv",
+        """#!/bin/sh
+case "${1:-}" in
+  python)
+    exit 0
+    ;;
+  sync)
+    printf '%s\\n' '0.5.97' > "${FAKE_SDK_VERSION_FILE}"
+    exit 0
+    ;;
+  pip)
+    case "$*" in
+      *tensorlake==0.5.121*)
+        printf '%s\\n' '0.5.121' > "${FAKE_SDK_VERSION_FILE}"
+        exit 0
+        ;;
+    esac
+    exit 79
+    ;;
+  run)
+    shift
+    if [ "${1:-}" = "--no-sync" ]; then
+        shift
+    fi
+    if [ "${1:-}" = "python" ]; then
+        shift
+        exec python3 "$@"
+    fi
+    exec "$@"
+    ;;
+esac
+exit 64
+""",
+    )
+    _write_executable(
+        fake_bin / "tl",
+        """#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+    printf '%s\\n' 'tl 0.5.121'
+    exit 0
+fi
+case "${1:-}" in
+  whoami)
+    if [ "${2:-}" = "-o" ]; then
+        printf '%s\\n' '{"apiKey":{"key":"<REDACTED>","organizationId":"org_T7MwTdFrBRHdpQPWf8Jdh","projectId":"project_Bn6BzggtncBfqQPFHJC8T"}}'
+    else
+        printf '%s\\n' 'Organization: org_T7MwTdFrBRHdpQPWf8Jdh'
+        printf '%s\\n' 'Project: project_Bn6BzggtncBfqQPFHJC8T'
+    fi
+    exit 0
+    ;;
+  secrets|sbx)
+    exit 0
+    ;;
+  app)
+    if [ "$(cat "${FAKE_SDK_VERSION_FILE}")" != "0.5.121" ]; then
+        printf '%s\\n' 'The installed Python Tensorlake SDK is incompatible with this CLI.' >&2
+        exit 78
+    fi
+    printf '%s\\n' '🌍 Public endpoint: https://example.invalid/webhook'
+    exit 0
+    ;;
+esac
+exit 64
+""",
+    )
+    result = _run_upgrade(environment, "\n")
+
+    assert result.returncode == 0, result.stderr
+    assert "Upgrade complete." in result.stdout
+    assert sdk_version_file.read_text().strip() == "0.5.121"
 
 
 def test_readme_explains_the_webhook_and_deployment_order() -> None:
