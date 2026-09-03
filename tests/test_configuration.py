@@ -3,6 +3,56 @@ import subprocess
 from pathlib import Path
 
 
+def _write_executable(path: Path, source: str) -> None:
+    path.write_text(source)
+    path.chmod(0o755)
+
+
+def _upgrade_test_environment(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_executable(
+        fake_bin / "uv",
+        """#!/bin/sh
+if [ "${1:-}" = "run" ]; then
+    shift
+    if [ "${1:-}" = "--no-sync" ]; then
+        shift
+    fi
+    if [ "${1:-}" = "python" ]; then
+        shift
+        exec python3 "$@"
+    fi
+    exec "$@"
+fi
+exit 0
+""",
+    )
+
+    environment = os.environ.copy()
+    environment.pop("TENSORLAKE_API_KEY", None)
+    environment.pop("TENSORLAKE_ORGANIZATION_ID", None)
+    environment.pop("TENSORLAKE_PROJECT_ID", None)
+    environment.update(
+        {
+            "HOME": str(tmp_path / "home"),
+            "PATH": f"{fake_bin}:{environment['PATH']}",
+        }
+    )
+    return fake_bin, environment
+
+
+def _run_upgrade(environment: dict[str, str], user_input: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", "scripts/configure-github-org.sh", "--upgrade"],
+        input=user_input,
+        text=True,
+        capture_output=True,
+        env=environment,
+        check=False,
+    )
+
+
 def test_configuration_script_uses_clis_and_configures_org_webhook() -> None:
     script = Path("scripts/configure-github-org.sh").read_text()
     assert "command -v gh" in script
@@ -40,11 +90,9 @@ def test_configuration_script_uses_clis_and_configures_org_webhook() -> None:
 
 
 def test_upgrade_rejects_an_authenticated_cli_without_project_context(tmp_path: Path) -> None:
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-
-    fake_tl = fake_bin / "tl"
-    fake_tl.write_text(
+    fake_bin, environment = _upgrade_test_environment(tmp_path)
+    _write_executable(
+        fake_bin / "tl",
         """#!/bin/sh
 if [ "${1:-}" = "whoami" ]; then
     if [ "${2:-}" = "-o" ]; then
@@ -55,33 +103,60 @@ if [ "${1:-}" = "whoami" ]; then
     exit 0
 fi
 exit 64
-"""
+""",
     )
-    fake_tl.chmod(0o755)
-
-    fake_uv = fake_bin / "uv"
-    fake_uv.write_text("#!/bin/sh\nexit 0\n")
-    fake_uv.chmod(0o755)
-
-    environment = os.environ.copy()
-    environment.update(
-        {
-            "HOME": str(tmp_path / "home"),
-            "PATH": f"{fake_bin}:{environment['PATH']}",
-        }
-    )
-    result = subprocess.run(
-        ["bash", "scripts/configure-github-org.sh", "--upgrade"],
-        input="n\n",
-        text=True,
-        capture_output=True,
-        env=environment,
-        check=False,
-    )
+    result = _run_upgrade(environment, "n\n")
 
     assert result.returncode != 0
     assert "Tensorlake organization and project are not selected" in result.stderr
     assert "Upgrade this Tensorlake installation?" not in result.stdout
+
+
+def test_upgrade_exports_the_prompted_project_api_key(tmp_path: Path) -> None:
+    fake_bin, environment = _upgrade_test_environment(tmp_path)
+    _write_executable(
+        fake_bin / "tl",
+        """#!/bin/sh
+case "${1:-}" in
+  whoami)
+    if [ "${2:-}" = "-o" ]; then
+        printf '%s\\n' '{"personalAccessToken":{"token":"<REDACTED>","organizationId":"org_T7MwTdFrBRHdpQPWf8Jdh","projectId":"project_Bn6BzggtncBfqQPFHJC8T"}}'
+    else
+        printf '%s\\n' 'Organization: org_T7MwTdFrBRHdpQPWf8Jdh'
+        printf '%s\\n' 'Project: project_Bn6BzggtncBfqQPFHJC8T'
+    fi
+    exit 0
+    ;;
+  secrets)
+    if [ "${2:-}" = "ls" ]; then
+        printf '%s\\n' 'permission denied' >&2
+        exit 1
+    fi
+    if [ "${2:-}" = "set" ]; then
+        if [ "${TENSORLAKE_API_KEY:-}" != "tl_project_key_test" ]; then
+            printf '%s\\n' 'project API key is not available' >&2
+            exit 77
+        fi
+        exit 0
+    fi
+    ;;
+  sbx)
+    exit 0
+    ;;
+  app)
+    printf '%s\\n' '🌍 Public endpoint: https://example.invalid/webhook'
+    exit 0
+    ;;
+esac
+exit 64
+""",
+    )
+    result = _run_upgrade(environment, "\ntl_project_key_test\n")
+
+    assert result.returncode == 0, result.stderr
+    assert "Upgrade complete." in result.stdout
+    assert "tl_project_key_test" not in result.stdout
+    assert "tl_project_key_test" not in result.stderr
 
 
 def test_readme_explains_the_webhook_and_deployment_order() -> None:

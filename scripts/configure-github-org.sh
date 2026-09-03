@@ -268,8 +268,8 @@ ensure_tensorlake_api_key_secret() {
     printf 'Using the Tensorlake API key supplied in TENSORLAKE_API_KEY.\n'
   fi
 
-  TENSORLAKE_API_KEY="${tensorlake_api_key}" \
-    uv run --no-sync python - "${api_key_env}" <<'PY'
+  export TENSORLAKE_API_KEY="${tensorlake_api_key}"
+  uv run --no-sync python - "${api_key_env}" <<'PY'
 import os
 import sys
 
