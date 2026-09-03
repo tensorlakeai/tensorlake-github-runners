@@ -8,6 +8,8 @@ APPLICATION_NAME="github_runner_webhook"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
 
+export TENSORLAKE_ORGANIZATION_ID="${TENSORLAKE_ORGANIZATION_ID:-org_T7MwTdFrBRHdpQPWf8Jdh}"
+export TENSORLAKE_PROJECT_ID="${TENSORLAKE_PROJECT_ID:-project_Bn6BzggtncBfqQPFHJC8T}"
 export PATH="${HOME}/.local/bin:${HOME}/.cargo/bin:${PATH}"
 
 info() {
