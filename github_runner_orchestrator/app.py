@@ -42,6 +42,7 @@ RUNNER_IMAGE = "github-actions-runner"
 RUNNER_USER = "tl-user"
 RUNNER_HOME = f"/home/{RUNNER_USER}"
 RUNNER_TIMEOUT_SECS = 7200
+RUNNER_MAX_CONTAINERS = 50
 CACHE_MOUNT_TIMEOUT_SECS = 30
 GITHUB_ORG_OVERRIDE: str | None = None
 
@@ -222,6 +223,7 @@ async def _mount_cache_filesystem(
 @function(
     image=app_image,
     timeout=7200,
+    max_containers=RUNNER_MAX_CONTAINERS,
     secrets=[
         "GITHUB_APP_CLIENT_ID",
         "GITHUB_APP_INSTALLATION_ID",

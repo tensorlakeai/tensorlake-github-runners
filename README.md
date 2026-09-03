@@ -52,7 +52,8 @@ value takes effect. Find the org/project IDs with `tl whoami -o json`.
 - **Resume a stopped deploy** (skips the GitHub App inputs and image rebuild):
   `./scripts/configure-github-org.sh --resume-from-step-6 <org>`.
 
-Runner image name, timeout, and required label are plain constants near the top of `app.py`.
+Runner image name, timeout, maximum concurrent runner count, and required label are plain constants
+near the top of `app.py`.
 
 ## Runner image
 
