@@ -160,6 +160,8 @@ ensure_authentication() {
     tl login
   fi
 
+  require_tensorlake_project_context
+
   printf '\nGitHub CLI identity:\n'
   gh auth status --hostname github.com
   printf '\nTensorlake destination:\n'
@@ -174,6 +176,69 @@ ensure_project_environment() {
   info "Install Python and sync the reference application dependencies with uv"
   uv python install 3.11
   uv sync --locked --python 3.11
+}
+
+write_tensorlake_project_context_env() {
+  local context_env="$1"
+  local identity_json="${TMP_DIR}/tensorlake-identity.json"
+
+  if ! tl whoami -o json >"${identity_json}"; then
+    return 1
+  fi
+  chmod 600 "${identity_json}"
+
+  if ! uv run --no-sync python - "${identity_json}" "${context_env}" <<'PY'
+import json
+import sys
+
+
+def find_value(value, names):
+    if isinstance(value, dict):
+        for name in names:
+            found = value.get(name)
+            if isinstance(found, str) and found:
+                return found
+        for nested in value.values():
+            found = find_value(nested, names)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for nested in value:
+            found = find_value(nested, names)
+            if found:
+                return found
+    return None
+
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    identity = json.load(source)
+
+values = {
+    "TENSORLAKE_ORGANIZATION_ID": find_value(
+        identity, ("organizationId", "organization_id")
+    ),
+    "TENSORLAKE_PROJECT_ID": find_value(identity, ("projectId", "project_id")),
+}
+if not all(values.values()):
+    raise SystemExit(1)
+
+with open(sys.argv[2], "w", encoding="utf-8") as output:
+    for name, value in values.items():
+        output.write(f'{name}="{value}"\n')
+PY
+  then
+    return 1
+  fi
+
+  chmod 600 "${context_env}"
+}
+
+require_tensorlake_project_context() {
+  local context_env="${TMP_DIR}/tensorlake-context.env"
+
+  if ! write_tensorlake_project_context_env "${context_env}"; then
+    die "Tensorlake organization and project are not selected. Run 'tl init' or set TENSORLAKE_ORGANIZATION_ID and TENSORLAKE_PROJECT_ID, then retry."
+  fi
 }
 
 tensorlake_secret_exists() {
@@ -217,55 +282,9 @@ PY
 }
 
 store_tensorlake_project_context_secrets() {
-  local identity_json="${TMP_DIR}/tensorlake-identity.json"
   local context_env="${TMP_DIR}/tensorlake-context.env"
 
-  tl whoami -o json >"${identity_json}"
-  chmod 600 "${identity_json}"
-  uv run --no-sync python - "${identity_json}" "${context_env}" <<'PY'
-import json
-import sys
-
-
-def find_value(value, names):
-    if isinstance(value, dict):
-        for name in names:
-            found = value.get(name)
-            if isinstance(found, str) and found:
-                return found
-        for nested in value.values():
-            found = find_value(nested, names)
-            if found:
-                return found
-    elif isinstance(value, list):
-        for nested in value:
-            found = find_value(nested, names)
-            if found:
-                return found
-    return None
-
-
-with open(sys.argv[1], encoding="utf-8") as source:
-    identity = json.load(source)
-
-values = {
-    "TENSORLAKE_ORGANIZATION_ID": find_value(
-        identity, ("organizationId", "organization_id")
-    ),
-    "TENSORLAKE_PROJECT_ID": find_value(identity, ("projectId", "project_id")),
-}
-missing = [name for name, value in values.items() if not value]
-if missing:
-    raise SystemExit(
-        "Tensorlake identity did not include required project context: "
-        + ", ".join(missing)
-    )
-
-with open(sys.argv[2], "w", encoding="utf-8") as output:
-    for name, value in values.items():
-        output.write(f'{name}="{value}"\n')
-PY
-  chmod 600 "${context_env}"
+  require_tensorlake_project_context
   tl secrets set --env-file "${context_env}"
   printf 'Stored the active Tensorlake organization and project IDs for cache provisioning.\n'
 }
@@ -392,6 +411,8 @@ upgrade_installation() {
     tl login
   fi
 
+  require_tensorlake_project_context
+
   printf '\nTensorlake destination:\n'
   tl whoami
   printf '\nThe existing application in this project will be redeployed.\n'
@@ -434,6 +455,7 @@ resume_from_step_6() {
     die "GitHub CLI is not authenticated. Run 'gh auth login --hostname github.com' and retry."
   tl whoami >/dev/null 2>&1 || \
     die "Tensorlake CLI is not authenticated. Run 'tl login' and retry."
+  require_tensorlake_project_context
 
   if [[ -z "${github_org}" ]]; then
     prompt_required github_org "GitHub organization"

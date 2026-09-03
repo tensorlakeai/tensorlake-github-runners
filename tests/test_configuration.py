@@ -1,3 +1,5 @@
+import os
+import subprocess
 from pathlib import Path
 
 
@@ -35,6 +37,51 @@ def test_configuration_script_uses_clis_and_configures_org_webhook() -> None:
         'configure_organization_hook "${github_org}" "${endpoint_url}" "${webhook_secret}"'
     )
     assert store_tensorlake_api_key < store_secrets < deploy_application < create_webhook
+
+
+def test_upgrade_rejects_an_authenticated_cli_without_project_context(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+
+    fake_tl = fake_bin / "tl"
+    fake_tl.write_text(
+        """#!/bin/sh
+if [ "${1:-}" = "whoami" ]; then
+    if [ "${2:-}" = "-o" ]; then
+        printf '%s\\n' '{"personalAccessToken":{"token":"<REDACTED>"}}'
+    else
+        printf '%s\\n' 'Credentials: Personal Access Token'
+    fi
+    exit 0
+fi
+exit 64
+"""
+    )
+    fake_tl.chmod(0o755)
+
+    fake_uv = fake_bin / "uv"
+    fake_uv.write_text("#!/bin/sh\nexit 0\n")
+    fake_uv.chmod(0o755)
+
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "HOME": str(tmp_path / "home"),
+            "PATH": f"{fake_bin}:{environment['PATH']}",
+        }
+    )
+    result = subprocess.run(
+        ["bash", "scripts/configure-github-org.sh", "--upgrade"],
+        input="n\n",
+        text=True,
+        capture_output=True,
+        env=environment,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "Tensorlake organization and project are not selected" in result.stderr
+    assert "Upgrade this Tensorlake installation?" not in result.stdout
 
 
 def test_readme_explains_the_webhook_and_deployment_order() -> None:
