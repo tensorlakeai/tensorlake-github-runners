@@ -226,7 +226,7 @@ def test_prepare_cache_mount_remints_and_retries_after_failed_io_probe(monkeypat
     monkeypatch.setattr(
         app_module,
         "cache_mount_environment",
-        lambda _name: {
+        lambda _name, api_key: {
             "TENSORLAKE_GIT_TOKEN": next(credentials),
             "TENSORLAKE_PROJECT_ID": "project_example",
         },
@@ -237,6 +237,7 @@ def test_prepare_cache_mount_remints_and_retries_after_failed_io_probe(monkeypat
             sandbox,
             "github-actions-cache-example",
             "example/repository",
+            "project-api-key",
         )
     )
 
@@ -305,6 +306,7 @@ def test_settle_cache_writes_retries_safe_unmount(monkeypatch) -> None:
 
 def _configure_runner_dependencies(monkeypatch, sandbox, logger, cache_result):
     monkeypatch.setattr(app_module, "logger", logger)
+    monkeypatch.setenv(app_module.RUNNER_TENSORLAKE_API_KEY_SECRET, "project-api-key")
     monkeypatch.setattr(app_module, "_github_credentials", lambda: SimpleNamespace())
     monkeypatch.setattr(
         app_module,
@@ -325,18 +327,20 @@ def _configure_runner_dependencies(monkeypatch, sandbox, logger, cache_result):
 
     if isinstance(cache_result, Exception):
 
-        def provision_cache(_repository):
+        def provision_cache(_repository, api_key):
+            assert api_key == "project-api-key"
             raise cache_result
     else:
 
-        def provision_cache(_repository):
+        def provision_cache(_repository, api_key):
+            assert api_key == "project-api-key"
             return cache_result
 
     monkeypatch.setattr(app_module, "ensure_cache_filesystem", provision_cache)
     monkeypatch.setattr(
         app_module,
         "cache_mount_environment",
-        lambda _name: {
+        lambda _name, api_key: {
             "TENSORLAKE_GIT_TOKEN": "scoped-token",
             "TENSORLAKE_PROJECT_ID": "project_example",
         },
@@ -353,7 +357,8 @@ def _configure_runner_dependencies(monkeypatch, sandbox, logger, cache_result):
 
     from tensorlake.sandbox import AsyncSandbox
 
-    async def create_sandbox(**_kwargs):
+    async def create_sandbox(**kwargs):
+        assert kwargs["api_key"] == "project-api-key"
         return sandbox
 
     monkeypatch.setattr(AsyncSandbox, "create", staticmethod(create_sandbox))

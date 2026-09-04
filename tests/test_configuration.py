@@ -71,8 +71,8 @@ def test_configuration_script_uses_clis_and_configures_org_webhook() -> None:
     assert """output.write(f'{name}="{value}"\\n')""" in script
     assert 'read -r -s -p "${prompt}: " value' in script
     assert 'prompt_secret_required tensorlake_api_key "Tensorlake project API key"' in script
-    assert 'tensorlake_secret_exists "TENSORLAKE_API_KEY"' in script
-    assert "output.write(f'TENSORLAKE_API_KEY=\"{value}\"\\n')" in script
+    assert 'tensorlake_secret_exists "${RUNNER_TENSORLAKE_API_KEY_SECRET}"' in script
+    assert "output.write(f'RUNNER_TENSORLAKE_API_KEY=\"{value}\"\\n')" in script
     assert "ensure_tensorlake_api_key_secret" in script
     assert "tl app deploy" in script
     assert "--resume-from-step-6" in script
@@ -271,7 +271,9 @@ def test_application_image_installs_dependencies_with_uv() -> None:
     application = Path("github_runner_orchestrator/app.py").read_text()
     assert "ghcr.io/astral-sh/uv:python3.11-bookworm-slim" in application
     assert "uv pip install --system" in application
-    assert '"TENSORLAKE_API_KEY"' in application
+    assert 'RUNNER_TENSORLAKE_API_KEY_SECRET = "RUNNER_TENSORLAKE_API_KEY"' in application
+    assert '"TENSORLAKE_API_KEY"' not in application
+    assert "api_key=tensorlake_api_key" in application
 
 
 def test_deployment_uses_repository_root_and_current_public_endpoint_api() -> None:

@@ -39,6 +39,9 @@ def test_ensure_cache_filesystem_reuses_existing_project_volume(monkeypatch) -> 
     )
 
     class Client:
+        def __init__(self, *, api_key):
+            assert api_key == "project-api-key"
+
         def list(self):
             return [existing]
 
@@ -51,7 +54,7 @@ def test_ensure_cache_filesystem_reuses_existing_project_volume(monkeypatch) -> 
 
     monkeypatch.setattr("tensorlake.filesystem.FilesystemClient", Client)
 
-    assert ensure_cache_filesystem("tensorlake/example") == existing.name
+    assert ensure_cache_filesystem("tensorlake/example", "project-api-key") == existing.name
 
 
 def test_ensure_cache_filesystem_repairs_existing_empty_volume(monkeypatch) -> None:
@@ -63,6 +66,9 @@ def test_ensure_cache_filesystem_repairs_existing_empty_volume(monkeypatch) -> N
     )
 
     class Client:
+        def __init__(self, *, api_key):
+            assert api_key == "project-api-key"
+
         def list(self):
             return [existing]
 
@@ -71,7 +77,7 @@ def test_ensure_cache_filesystem_repairs_existing_empty_volume(monkeypatch) -> N
 
     monkeypatch.setattr("tensorlake.filesystem.FilesystemClient", Client)
 
-    assert ensure_cache_filesystem("tensorlake/example") == existing.name
+    assert ensure_cache_filesystem("tensorlake/example", "project-api-key") == existing.name
     assert writes[0][0][0] == CACHE_INITIALIZATION_PATH
 
 
@@ -84,6 +90,9 @@ def test_ensure_cache_filesystem_creates_repository_volume(monkeypatch) -> None:
     )
 
     class Client:
+        def __init__(self, *, api_key):
+            assert api_key == "project-api-key"
+
         def list(self):
             return []
 
@@ -92,7 +101,7 @@ def test_ensure_cache_filesystem_creates_repository_volume(monkeypatch) -> None:
 
     monkeypatch.setattr("tensorlake.filesystem.FilesystemClient", Client)
 
-    assert ensure_cache_filesystem("tensorlake/example") == created.name
+    assert ensure_cache_filesystem("tensorlake/example", "project-api-key") == created.name
     assert writes == [
         (
             (
@@ -112,6 +121,9 @@ def test_ensure_cache_filesystem_recovers_from_concurrent_creation(monkeypatch) 
     listings = iter([[], [existing]])
 
     class Client:
+        def __init__(self, *, api_key):
+            assert api_key == "project-api-key"
+
         def list(self):
             return next(listings)
 
@@ -124,7 +136,7 @@ def test_ensure_cache_filesystem_recovers_from_concurrent_creation(monkeypatch) 
 
     monkeypatch.setattr("tensorlake.filesystem.FilesystemClient", Client)
 
-    assert ensure_cache_filesystem("tensorlake/example") == existing.name
+    assert ensure_cache_filesystem("tensorlake/example", "project-api-key") == existing.name
 
 
 def test_ensure_cache_filesystem_initialization_race_accepts_other_writer(
@@ -142,6 +154,9 @@ def test_ensure_cache_filesystem_initialization_race_accepts_other_writer(
     )
 
     class Client:
+        def __init__(self, *, api_key):
+            assert api_key == "project-api-key"
+
         def list(self):
             return [existing]
 
@@ -150,7 +165,7 @@ def test_ensure_cache_filesystem_initialization_race_accepts_other_writer(
 
     monkeypatch.setattr("tensorlake.filesystem.FilesystemClient", Client)
 
-    assert ensure_cache_filesystem("tensorlake/example") == existing.name
+    assert ensure_cache_filesystem("tensorlake/example", "project-api-key") == existing.name
 
 
 def test_cache_mount_environment_uses_filesystem_scoped_credential(monkeypatch) -> None:
@@ -158,6 +173,9 @@ def test_cache_mount_environment_uses_filesystem_scoped_credential(monkeypatch) 
 
     class Client:
         project_id = "project_example"
+
+        def __init__(self, *, api_key):
+            assert api_key == "project-api-key"
 
         def __enter__(self):
             return self
@@ -169,13 +187,10 @@ def test_cache_mount_environment_uses_filesystem_scoped_credential(monkeypatch) 
             assert name == "github-actions-cache-example"
             return credential
 
-    monkeypatch.setattr(
-        "tensorlake.repositories.RepositoryClient.from_env",
-        lambda: Client(),
-    )
+    monkeypatch.setattr("tensorlake.repositories.RepositoryClient", Client)
     monkeypatch.setenv("TENSORLAKE_API_URL", "https://api.example.test")
 
-    assert cache_mount_environment("github-actions-cache-example") == {
+    assert cache_mount_environment("github-actions-cache-example", "project-api-key") == {
         "TENSORLAKE_GIT_TOKEN": "scoped-token",
         "TENSORLAKE_GIT_USERNAME": "scoped-user",
         "TENSORLAKE_PROJECT_ID": "project_example",
