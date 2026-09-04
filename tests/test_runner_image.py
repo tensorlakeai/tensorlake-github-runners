@@ -8,12 +8,19 @@ def test_runner_image_uses_oci_base_and_preinstalls_runner() -> None:
     assert "download.docker.com/linux/ubuntu" in dockerfile
     assert "docker-ce" in dockerfile
     assert "systemctl enable containerd.service docker.service" in dockerfile
-    assert "ARG TENSORLAKE_CLI_VERSION=cli-v0.5.123" in dockerfile
+    assert "ENV TENSORLAKE_CLI_VERSION=cli-v0.5.123" in dockerfile
+    assert "ARG TENSORLAKE_CLI_VERSION" not in dockerfile
     assert 'TENSORLAKE_VERSION="${TENSORLAKE_CLI_VERSION}"' in dockerfile
     assert 'test "$(tl --version)" = "tl ${TENSORLAKE_CLI_VERSION#cli-v}"' in dockerfile
 
     build_script = Path("scripts/build-runner-image.sh").read_text()
-    assert '--build-arg "TENSORLAKE_CLI_VERSION=' in build_script
+    assert "--build-arg" not in build_script
+    assert "TENSORLAKE_RUNNER_CLI_VERSION" not in build_script
+
+
+def test_orchestrator_image_excludes_local_build_state() -> None:
+    ignored = set(Path(".dockerignore").read_text().splitlines())
+    assert {".git", ".venv", ".pytest_cache", ".ruff_cache", "__pycache__"} <= ignored
 
 
 def test_orchestrate_app_invokes_preinstalled_runner_directly() -> None:

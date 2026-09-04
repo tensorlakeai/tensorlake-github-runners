@@ -11,7 +11,6 @@ fi
 
 tl sbx image create sandbox-image/Dockerfile \
   --registered-name github-actions-runner \
-  --build-arg "TENSORLAKE_CLI_VERSION=${TENSORLAKE_RUNNER_CLI_VERSION:-cli-v0.5.123}" \
   --cpus "${TENSORLAKE_IMAGE_BUILD_CPUS:-4}" \
   --memory "${TENSORLAKE_IMAGE_BUILD_MEMORY_MB:-4096}" \
   --disk_mb "${TENSORLAKE_IMAGE_DISK_MB:-10240}" \

@@ -71,9 +71,10 @@ Builds and registers the `github-actions-runner` sandbox image. It is based on *
 (imported into the project as `ubuntu-2204-base`; the script imports it if missing) and installs
 systemd — booted as PID 1 so Docker's systemd units start — Docker CE, the `tl` CLI with FUSE
 support, and the GitHub Actions runner, and creates the `tl-user` account.
-The TLFS-capable `tl` binary is pinned in the Dockerfile and recorded as an OCI label so rebuilding
-an image cannot silently select a different mount implementation. Set
-`TENSORLAKE_RUNNER_CLI_VERSION=cli-vX.Y.Z` only when deliberately qualifying an upgrade.
+The TLFS-capable `tl` binary is pinned by `TENSORLAKE_CLI_VERSION` in the Dockerfile and recorded as
+an OCI label so rebuilding an image cannot silently select a different mount implementation. Change
+that Dockerfile pin only when deliberately qualifying an upgrade. The base is a platform rootfs, so
+its builder intentionally has no runtime build-argument override channel.
 
 Base the image on an OS whose glibc matches your release ABI target: Ubuntu 22.04 ships glibc 2.35,
 which keeps release binaries within a GLIBC ≤ 2.34 floor. A newer base (e.g. Ubuntu 24.04 / glibc
