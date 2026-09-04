@@ -313,7 +313,7 @@ def _configure_runner_dependencies(monkeypatch, sandbox, logger, cache_result):
     )
     monkeypatch.setattr(
         app_module,
-        "generate_org_jit_config",
+        "generate_repository_jit_config",
         lambda **_kwargs: SimpleNamespace(encoded_jit_config="jit-config"),
     )
 

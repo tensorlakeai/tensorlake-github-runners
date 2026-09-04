@@ -21,7 +21,7 @@ from github_runner_orchestrator.cache import (
 )
 from github_runner_orchestrator.github import (
     build_runner_name,
-    generate_org_jit_config,
+    generate_repository_jit_config,
     get_installation_token,
 )
 from github_runner_orchestrator.models import AppCredentials, RunnerRequest
@@ -111,7 +111,7 @@ def _runner_request_from_dict(data: dict) -> RunnerRequest:
         org=data["org"],
         run_id=data.get("run_id"),
         labels=list(data["labels"]),
-        repository=data.get("repository"),
+        repository=data["repository"],
         workflow_job_id=data.get("workflow_job_id"),
     )
 
@@ -422,9 +422,9 @@ async def run_github_runner(request_data: dict) -> dict:
     resources = resources_for_labels(request.labels)
 
     jit = await asyncio.to_thread(
-        generate_org_jit_config,
+        generate_repository_jit_config,
         installation_token=installation_token,
-        org=request.org,
+        repository=request.repository,
         runner_name=runner_name,
         runner_group_id=runner_group_id,
         labels=request.labels,

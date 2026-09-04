@@ -37,6 +37,13 @@ def match_runner_request(
         return None, "organization.login is missing"
 
     repository = (event.get("repository") or {}).get("full_name")
+    if not isinstance(repository, str) or repository.count("/") != 1:
+        return None, "repository.full_name is missing or malformed"
+    repository_owner, repository_name = repository.split("/", 1)
+    if not repository_owner or not repository_name:
+        return None, "repository.full_name is missing or malformed"
+    if repository_owner.casefold() != org.casefold():
+        return None, "repository owner does not match organization"
     return (
         RunnerRequest(
             org=org,

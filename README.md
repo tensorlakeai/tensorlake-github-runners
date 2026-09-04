@@ -9,8 +9,10 @@ Sandboxes while keeping the GitHub contract.
 
 **Flow:** GitHub sends a `workflow_job` event → the webhook signature is verified with
 `GITHUB_WEBHOOK_SECRET` → only `queued` jobs carrying the `tensorlake` label are accepted →
-`run_github_runner` mints GitHub App JIT runner credentials, provisions and mounts the repository's
-cache volume, starts the sandbox, supervises the single job, and terminates the sandbox.
+`run_github_runner` mints repository-scoped GitHub App JIT runner credentials, provisions and mounts
+that same repository's cache volume, starts the sandbox, supervises the single job, and terminates
+the sandbox. Repository scope is part of the isolation boundary: an organization-scoped runner could
+claim another repository's queued job after its cache had already been selected.
 
 ## Files
 
@@ -38,7 +40,7 @@ builds the runner image, deploys the application, and creates the organization w
 organization-owner access and a Tensorlake project.
 
 **GitHub App vs. webhook.** Register the GitHub App with **Webhook → Active disabled** and only the
-**Self-hosted runners: Read and write** organization permission — it supplies credentials only. A
+**Administration: Read and write** repository permission — it supplies credentials only. A
 *separate* organization webhook (created after deploy, using the endpoint the deploy returns) delivers
 `workflow_job` events. Both use the same `GITHUB_WEBHOOK_SECRET`.
 
@@ -114,6 +116,8 @@ directory (not an `actions/cache` service); point a tool's cache directory at a 
   and a manual version you can bump.
 - Never write secrets (tokens, registry credentials, signing material) into the volume. Pull requests
   and branches of a repository share its cache, so do not expose the runner to untrusted code.
+- The JIT runner is registered to the same repository before its cache is mounted. Missing or
+  malformed repository identity fails closed; organization-scoped fallback is deliberately absent.
 - Writes autosave during the job; the orchestrator syncs and unmounts on exit. Provisioning is
   best-effort unless a workflow asserts the mount (see below).
 - Cleanup: `tl fs ls` lists the `github-actions-cache-*` volumes; `tl fs rm <name>` deletes one.
