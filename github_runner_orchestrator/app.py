@@ -15,12 +15,13 @@ from github_runner_orchestrator.cache import (
     CACHE_MOUNT_PATH,
     CACHE_UNMOUNT_MAX_ATTEMPTS,
     CACHE_UNMOUNT_RETRY_SECONDS,
+    cache_credential_diagnostics,
     cache_mount_environment,
     ensure_cache_filesystem,
 )
 from github_runner_orchestrator.github import (
     build_runner_name,
-    generate_org_jit_config,
+    generate_repository_jit_config,
     get_installation_token,
 )
 from github_runner_orchestrator.models import AppCredentials, RunnerRequest
@@ -44,6 +45,10 @@ RUNNER_HOME = f"/home/{RUNNER_USER}"
 RUNNER_TIMEOUT_SECS = 7200
 RUNNER_MAX_CONTAINERS = 50
 CACHE_MOUNT_TIMEOUT_SECS = 30
+CACHE_MOUNT_MAX_ATTEMPTS = 2
+CACHE_MOUNT_RETRY_SECONDS = 1
+CACHE_MOUNT_DETACH_TIMEOUT_SECS = 10
+CACHE_MOUNT_PROBE_TIMEOUT_SECS = 15
 GITHUB_ORG_OVERRIDE: str | None = None
 
 # The runner is launched as a detached, managed process and polled, rather than
@@ -59,6 +64,34 @@ RUNNER_POLL_INTERVAL_SECS = 15
 RUNNER_SUPERVISION_BUDGET_SECS = RUNNER_TIMEOUT_SECS - 180
 RUNNER_LOG_TAIL_LINES = 40
 RUNNER_LOG_EVERY_N_POLLS = 4
+
+CACHE_MOUNT_PROBE_SCRIPT = r"""
+import os
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+root = Path(sys.argv[1])
+probe = Path(tempfile.mkdtemp(prefix=".tensorlake-runner-probe-", dir=root))
+probe_file = probe / "round-trip"
+payload = b"tensorlake-cache-ready\n"
+try:
+    descriptor = os.open(probe_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        if os.write(descriptor, payload) != len(payload):
+            raise OSError("short cache readiness write")
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    if probe_file.read_bytes() != payload:
+        raise OSError("cache readiness read did not match the written payload")
+    probe_file.unlink()
+    probe.rmdir()
+except Exception:
+    shutil.rmtree(probe, ignore_errors=True)
+    raise
+"""
 
 
 def _env_int(name: str, default: int) -> int:
@@ -78,7 +111,7 @@ def _runner_request_from_dict(data: dict) -> RunnerRequest:
         org=data["org"],
         run_id=data.get("run_id"),
         labels=list(data["labels"]),
-        repository=data.get("repository"),
+        repository=data["repository"],
         workflow_job_id=data.get("workflow_job_id"),
     )
 
@@ -156,6 +189,7 @@ async def _mount_cache_filesystem(
     sandbox,
     file_system_name: str,
     mount_environment: dict[str, str],
+    process_name: str = "tensorlake-cache-mount",
 ) -> None:
     process_environment = {
         **mount_environment,
@@ -183,11 +217,11 @@ async def _mount_cache_filesystem(
         ],
         env=process_environment,
         user=RUNNER_USER,
-        name="tensorlake-cache-mount",
+        name=process_name,
         restart={"policy": "never"},
     )
 
-    for _ in range(CACHE_MOUNT_TIMEOUT_SECS):
+    for wait_attempt in range(1, CACHE_MOUNT_TIMEOUT_SECS + 1):
         mounted = await sandbox.run(
             "mountpoint",
             ["-q", CACHE_MOUNT_PATH],
@@ -195,11 +229,28 @@ async def _mount_cache_filesystem(
             user=RUNNER_USER,
         )
         if mounted.exit_code == 0:
-            return
+            probe = await sandbox.run(
+                "python3",
+                ["-c", CACHE_MOUNT_PROBE_SCRIPT, CACHE_MOUNT_PATH],
+                timeout=CACHE_MOUNT_PROBE_TIMEOUT_SECS,
+                user=RUNNER_USER,
+            )
+            if probe.exit_code == 0:
+                return
 
-        mount_process = await sandbox.get_process("tensorlake-cache-mount")
+            mount_stderr = await sandbox.get_stderr(process_name)
+            daemon_output = "\n".join(mount_stderr.lines).strip()[-2000:]
+            probe_output = (probe.stderr or probe.stdout).strip()[-2000:]
+            raise RuntimeError(
+                f"Cloud Volume {file_system_name!r} mounted at {CACHE_MOUNT_PATH}, but its "
+                f"authenticated write/read/delete readiness probe failed with exit code "
+                f"{probe.exit_code}: {probe_output or 'no probe output'}; mount stderr: "
+                f"{daemon_output or 'no stderr output'}"
+            )
+
+        mount_process = await sandbox.get_process(process_name)
         if mount_process.status != "running":
-            stderr = await sandbox.get_stderr("tensorlake-cache-mount")
+            stderr = await sandbox.get_stderr(process_name)
             output = "\n".join(stderr.lines).strip()[-2000:]
             exit_code = mount_process.exit_code
             process_status = getattr(
@@ -212,11 +263,137 @@ async def _mount_cache_filesystem(
                 f"with status {process_status} and exit code {exit_code}: "
                 f"{output or 'no stderr output'}"
             )
+        if wait_attempt == 1 or wait_attempt % 5 == 0:
+            logger.info(
+                "Waiting for repository cache mount",
+                cache_filesystem=file_system_name,
+                cache_mount_path=CACHE_MOUNT_PATH,
+                mount_process=process_name,
+                wait_attempt=wait_attempt,
+                wait_limit=CACHE_MOUNT_TIMEOUT_SECS,
+                stage="cache_mount_wait",
+            )
         await asyncio.sleep(1)
 
     raise RuntimeError(
         f"Cloud Volume {file_system_name!r} did not mount at {CACHE_MOUNT_PATH} "
         f"within {CACHE_MOUNT_TIMEOUT_SECS} seconds"
+    )
+
+
+async def _discard_failed_cache_mount(sandbox, process_name: str) -> None:
+    """Stop a failed mount attempt and prove the mountpoint is detached before retrying."""
+    try:
+        await sandbox.kill_process(process_name)
+    except Exception as error:  # noqa: BLE001 -- cleanup must survive any sandbox transport error
+        logger.warning(
+            "Failed to stop unhealthy repository cache mount process",
+            sandbox_id=sandbox.sandbox_id,
+            mount_process=process_name,
+            error_type=type(error).__name__,
+            error=str(error),
+            stage="cache_mount_cleanup",
+        )
+
+    detach = await sandbox.run(
+        "sudo",
+        ["/usr/bin/fusermount3", "-uz", CACHE_MOUNT_PATH],
+        timeout=10,
+        user=RUNNER_USER,
+    )
+    if detach.exit_code != 0:
+        logger.warning(
+            "Lazy detach of unhealthy repository cache mount returned non-zero",
+            sandbox_id=sandbox.sandbox_id,
+            mount_process=process_name,
+            exit_code=detach.exit_code,
+            output=(detach.stderr or detach.stdout)[-2000:],
+            stage="cache_mount_cleanup",
+        )
+
+    for wait_attempt in range(1, CACHE_MOUNT_DETACH_TIMEOUT_SECS + 1):
+        mounted = await sandbox.run(
+            "mountpoint",
+            ["-q", CACHE_MOUNT_PATH],
+            timeout=10,
+            user=RUNNER_USER,
+        )
+        if mounted.exit_code != 0:
+            return
+        if wait_attempt == 1 or wait_attempt % 5 == 0:
+            logger.info(
+                "Waiting for unhealthy repository cache mount to detach",
+                sandbox_id=sandbox.sandbox_id,
+                mount_process=process_name,
+                wait_attempt=wait_attempt,
+                wait_limit=CACHE_MOUNT_DETACH_TIMEOUT_SECS,
+                stage="cache_mount_cleanup",
+            )
+        await asyncio.sleep(1)
+
+    raise RuntimeError(
+        f"unhealthy cache mount {process_name!r} did not detach from {CACHE_MOUNT_PATH} "
+        f"within {CACHE_MOUNT_DETACH_TIMEOUT_SECS} seconds"
+    )
+
+
+async def _prepare_cache_mount(
+    sandbox,
+    file_system_name: str,
+    repository: str | None,
+) -> dict[str, str]:
+    """Mint fresh authority and return only after the cache passes real FUSE I/O."""
+    last_error: Exception | None = None
+    for attempt in range(1, CACHE_MOUNT_MAX_ATTEMPTS + 1):
+        mount_environment = await asyncio.to_thread(
+            cache_mount_environment,
+            file_system_name,
+        )
+        process_name = (
+            "tensorlake-cache-mount" if attempt == 1 else f"tensorlake-cache-mount-retry-{attempt}"
+        )
+        logger.info(
+            "Starting repository cache mount attempt",
+            repository=repository,
+            sandbox_id=sandbox.sandbox_id,
+            cache_filesystem=file_system_name,
+            mount_process=process_name,
+            attempt=attempt,
+            attempt_limit=CACHE_MOUNT_MAX_ATTEMPTS,
+            stage="cache_mount",
+            **cache_credential_diagnostics(mount_environment["TENSORLAKE_GIT_TOKEN"]),
+        )
+        try:
+            await _mount_cache_filesystem(
+                sandbox,
+                file_system_name,
+                mount_environment,
+                process_name,
+            )
+            return mount_environment
+        except Exception as error:  # noqa: BLE001 -- any mount failure gets one clean retry
+            last_error = error
+            will_retry = attempt < CACHE_MOUNT_MAX_ATTEMPTS
+            logger.warning(
+                "Repository cache mount attempt failed",
+                repository=repository,
+                sandbox_id=sandbox.sandbox_id,
+                cache_filesystem=file_system_name,
+                mount_process=process_name,
+                attempt=attempt,
+                attempt_limit=CACHE_MOUNT_MAX_ATTEMPTS,
+                will_retry=will_retry,
+                error_type=type(error).__name__,
+                error=str(error),
+                stage="cache_mount",
+            )
+            await _discard_failed_cache_mount(sandbox, process_name)
+            if will_retry:
+                await asyncio.sleep(CACHE_MOUNT_RETRY_SECONDS)
+
+    raise RuntimeError(
+        f"Cloud Volume {file_system_name!r} failed authenticated readiness after "
+        f"{CACHE_MOUNT_MAX_ATTEMPTS} fresh-credential mount attempts: {last_error}"
     )
 
 
@@ -245,9 +422,9 @@ async def run_github_runner(request_data: dict) -> dict:
     resources = resources_for_labels(request.labels)
 
     jit = await asyncio.to_thread(
-        generate_org_jit_config,
+        generate_repository_jit_config,
         installation_token=installation_token,
-        org=request.org,
+        repository=request.repository,
         runner_name=runner_name,
         runner_group_id=runner_group_id,
         labels=request.labels,
@@ -301,14 +478,10 @@ async def run_github_runner(request_data: dict) -> dict:
 
         if cache_filesystem_name:
             try:
-                mount_environment = await asyncio.to_thread(
-                    cache_mount_environment,
-                    cache_filesystem_name,
-                )
-                await _mount_cache_filesystem(
+                mount_environment = await _prepare_cache_mount(
                     sandbox,
                     cache_filesystem_name,
-                    mount_environment,
+                    request.repository,
                 )
                 cache_mounted = True
                 logger.info(
@@ -362,7 +535,7 @@ async def run_github_runner(request_data: dict) -> dict:
 
         try:
             request_context = RequestContext.get()
-        except Exception:
+        except Exception:  # noqa: BLE001 -- absence of function request context is recoverable
             request_context = None
             logger.warning(
                 "Request context unavailable; runner supervision cannot extend "
@@ -396,7 +569,7 @@ async def run_github_runner(request_data: dict) -> dict:
                             "elapsed_secs": str(elapsed),
                         },
                     )
-                except Exception as error:
+                except Exception as error:  # noqa: BLE001 -- progress telemetry is best-effort
                     logger.warning(
                         "Failed to write runner progress update",
                         sandbox_id=sandbox.sandbox_id,
@@ -430,7 +603,7 @@ async def run_github_runner(request_data: dict) -> dict:
                         elapsed_secs=elapsed,
                         stdout_tail=tail[-4000:],
                     )
-                except Exception as error:
+                except Exception as error:  # noqa: BLE001 -- log polling is best-effort
                     logger.warning(
                         "Failed to read runner stdout during poll",
                         sandbox_id=sandbox.sandbox_id,
@@ -447,7 +620,7 @@ async def run_github_runner(request_data: dict) -> dict:
             stdout_tail = "\n".join(stdout.lines)[-4000:]
             stderr = await sandbox.get_stderr(RUNNER_PROCESS_NAME)
             stderr_tail = "\n".join(stderr.lines)[-4000:]
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 -- preserve runner result if log retrieval fails
             logger.warning(
                 "Failed to read runner output after exit",
                 sandbox_id=sandbox.sandbox_id,

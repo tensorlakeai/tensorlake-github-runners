@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from github_runner_orchestrator.models import RunnerResources
 
-
 MIN_RUNNER_DISK_MB = 10240
 MAX_RUNNER_DISK_MB = 102400
 DEFAULT_RUNNER_RESOURCES = RunnerResources(

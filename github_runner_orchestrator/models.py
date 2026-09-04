@@ -9,7 +9,7 @@ class RunnerRequest:
     org: str
     run_id: int | None
     labels: list[str]
-    repository: str | None = None
+    repository: str
     workflow_job_id: int | None = None
 
 

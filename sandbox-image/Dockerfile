@@ -10,6 +10,7 @@
 # account the base used to provide.
 FROM ubuntu-2204-base
 
+ARG TENSORLAKE_CLI_VERSION=cli-v0.5.123
 ENV DEBIAN_FRONTEND=noninteractive
 
 # The tl-user account (passwordless sudo + Docker access) that the orchestrator
@@ -92,10 +93,12 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 RUN curl -fsSL https://tensorlake.ai/install -o /tmp/install-tensorlake.sh \
-  && sh /tmp/install-tensorlake.sh --system --yes \
+  && TENSORLAKE_VERSION="${TENSORLAKE_CLI_VERSION}" sh /tmp/install-tensorlake.sh --system --yes \
   && rm /tmp/install-tensorlake.sh \
-  && tl version \
+  && test "$(tl --version)" = "tl ${TENSORLAKE_CLI_VERSION#cli-v}" \
   && install -d -o tl-user -g tl-user /mnt/tensorlake-cache
+
+LABEL ai.tensorlake.cli-version="${TENSORLAKE_CLI_VERSION}"
 
 RUN mkdir -p /opt/actions-runner \
   && cd /opt/actions-runner \

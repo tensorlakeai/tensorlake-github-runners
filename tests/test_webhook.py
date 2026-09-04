@@ -28,6 +28,7 @@ def test_match_runner_request_accepts_queued_required_label() -> None:
     request, reason = match_runner_request(event, "tensorlake")
     assert request is not None
     assert request.org == "tensorlake"
+    assert request.repository == "tensorlake/example"
     assert request.run_id == 20
     assert reason == "queued job requests 'tensorlake'"
 
@@ -45,3 +46,30 @@ def test_match_runner_request_ignores_missing_label() -> None:
     request, reason = match_runner_request(event, "tensorlake")
     assert request is None
     assert "do not include" in reason
+
+
+def test_match_runner_request_rejects_missing_repository() -> None:
+    event = {
+        "action": "queued",
+        "organization": {"login": "tensorlake"},
+        "workflow_job": {"labels": ["self-hosted", "tensorlake"]},
+    }
+
+    request, reason = match_runner_request(event, "tensorlake")
+
+    assert request is None
+    assert reason == "repository.full_name is missing or malformed"
+
+
+def test_match_runner_request_rejects_repository_from_another_organization() -> None:
+    event = {
+        "action": "queued",
+        "organization": {"login": "tensorlake"},
+        "repository": {"full_name": "other-org/example"},
+        "workflow_job": {"labels": ["self-hosted", "tensorlake"]},
+    }
+
+    request, reason = match_runner_request(event, "tensorlake")
+
+    assert request is None
+    assert reason == "repository owner does not match organization"

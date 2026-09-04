@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from urllib.parse import quote
 from typing import Any
 
 import jwt
@@ -53,17 +54,21 @@ def get_installation_token(
     return str(response.json()["token"])
 
 
-def generate_org_jit_config(
+def generate_repository_jit_config(
     installation_token: str,
-    org: str,
+    repository: str,
     runner_name: str,
     runner_group_id: int,
     labels: list[str],
     api_base: str = DEFAULT_API_BASE,
     work_folder: str = "_work",
 ) -> JitConfig:
+    parts = repository.split("/")
+    if len(parts) != 2 or not all(parts) or any(part != part.strip() for part in parts):
+        raise ValueError(f"repository must be an exact owner/name pair, got {repository!r}")
+    owner, name = (quote(part, safe="") for part in parts)
     response = _post(
-        f"{api_base}/orgs/{org}/actions/runners/generate-jitconfig",
+        f"{api_base}/repos/{owner}/{name}/actions/runners/generate-jitconfig",
         installation_token,
         {
             "name": runner_name,

@@ -1,8 +1,9 @@
 import asyncio
 from types import SimpleNamespace
 
-import github_runner_orchestrator.app as app_module
 import pytest
+
+import github_runner_orchestrator.app as app_module
 from github_runner_orchestrator.cache import CACHE_MOUNT_PATH
 
 # The mount and unmount run under sudo so the mount daemon can raise its
@@ -38,6 +39,7 @@ class FakeSandbox:
         # supervision loop finishes on its first poll without sleeping.
         self.runner_process_status = "exited"
         self.runner_exit_code = 0
+        self.killed_processes: list[str] = []
 
     async def start_process(
         self, command, args, env=None, name=None, restart=None, user=None, working_dir=None
@@ -73,6 +75,9 @@ class FakeSandbox:
 
     async def get_stderr(self, name):
         return SimpleNamespace(lines=["mount failed"])
+
+    async def kill_process(self, name):
+        self.killed_processes.append(name)
 
     async def terminate(self):
         self.terminated = True
@@ -119,6 +124,7 @@ def test_mount_cache_starts_scoped_foreground_mount_and_waits_until_ready() -> N
         )
     ]
     assert sandbox.mount_checks == 2
+    assert any(call[0] == "python3" for call in sandbox.run_calls)
     assert all(
         call[4] == app_module.RUNNER_USER for call in sandbox.run_calls if call[0] == "mountpoint"
     )
@@ -156,6 +162,97 @@ def test_mount_cache_reports_process_failure_immediately() -> None:
                 {},
             )
         )
+
+
+def test_mount_cache_rejects_a_mounted_but_unusable_filesystem() -> None:
+    class ProbeFailureSandbox(FakeSandbox):
+        async def run(self, command, args, env=None, working_dir=None, timeout=None, user=None):
+            result = await super().run(command, args, env, working_dir, timeout, user)
+            if command == "python3":
+                return SimpleNamespace(
+                    exit_code=1,
+                    stdout="",
+                    stderr="Permission denied",
+                )
+            return result
+
+    sandbox = ProbeFailureSandbox()
+
+    with pytest.raises(RuntimeError, match="authenticated write/read/delete readiness probe") as e:
+        asyncio.run(
+            app_module._mount_cache_filesystem(
+                sandbox,
+                "github-actions-cache-example",
+                {},
+            )
+        )
+
+    assert "Permission denied" in str(e.value)
+    assert "mount failed" in str(e.value)
+
+
+def test_prepare_cache_mount_remints_and_retries_after_failed_io_probe(monkeypatch) -> None:
+    class RetrySandbox(FakeSandbox):
+        def __init__(self) -> None:
+            super().__init__()
+            self.active_mount = False
+            self.probes = 0
+
+        async def start_process(self, *args, **kwargs):
+            self.active_mount = True
+            return await super().start_process(*args, **kwargs)
+
+        async def run(self, command, args, env=None, working_dir=None, timeout=None, user=None):
+            self.run_calls.append((command, args, env, working_dir, user))
+            if command == "mountpoint":
+                return SimpleNamespace(exit_code=0 if self.active_mount else 1)
+            if command == "python3":
+                self.probes += 1
+                if self.probes == 1:
+                    return SimpleNamespace(exit_code=1, stdout="", stderr="Input/output error")
+            if command == "sudo" and args[:2] == ["/usr/bin/fusermount3", "-uz"]:
+                self.active_mount = False
+            return SimpleNamespace(exit_code=0, stdout="", stderr="")
+
+        async def kill_process(self, name):
+            await super().kill_process(name)
+            self.active_mount = False
+
+    sandbox = RetrySandbox()
+    logger = FakeLogger()
+    credentials = iter(["first-token", "second-token"])
+    monkeypatch.setattr(app_module, "logger", logger)
+    monkeypatch.setattr(app_module, "CACHE_MOUNT_RETRY_SECONDS", 0)
+    monkeypatch.setattr(
+        app_module,
+        "cache_mount_environment",
+        lambda _name: {
+            "TENSORLAKE_GIT_TOKEN": next(credentials),
+            "TENSORLAKE_PROJECT_ID": "project_example",
+        },
+    )
+
+    environment = asyncio.run(
+        app_module._prepare_cache_mount(
+            sandbox,
+            "github-actions-cache-example",
+            "example/repository",
+        )
+    )
+
+    assert environment["TENSORLAKE_GIT_TOKEN"] == "second-token"
+    assert sandbox.probes == 2
+    assert sandbox.killed_processes == ["tensorlake-cache-mount"]
+    assert [process[3] for process in sandbox.started_processes] == [
+        "tensorlake-cache-mount",
+        "tensorlake-cache-mount-retry-2",
+    ]
+    failed_attempt = next(
+        fields
+        for message, fields in logger.warning_events
+        if message == "Repository cache mount attempt failed"
+    )
+    assert failed_attempt["will_retry"] is True
 
 
 def test_settle_cache_writes_retries_safe_unmount(monkeypatch) -> None:
@@ -216,7 +313,7 @@ def _configure_runner_dependencies(monkeypatch, sandbox, logger, cache_result):
     )
     monkeypatch.setattr(
         app_module,
-        "generate_org_jit_config",
+        "generate_repository_jit_config",
         lambda **_kwargs: SimpleNamespace(encoded_jit_config="jit-config"),
     )
 

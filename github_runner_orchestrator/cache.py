@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import base64
 import hashlib
+import json
 import os
 import re
+import time
 
 CACHE_FILESYSTEM_NAME_PREFIX = "github-actions-cache"
 CACHE_INITIALIZATION_PATH = ".tensorlake-cache-initialized"
@@ -89,3 +92,27 @@ def cache_mount_environment(file_system_name: str) -> dict[str, str]:
     if api_url := os.environ.get("TENSORLAKE_API_URL"):
         environment["TENSORLAKE_API_URL"] = api_url
     return environment
+
+
+def cache_credential_diagnostics(token: str) -> dict[str, str | int | None]:
+    """Return log-safe identity and lifetime fields for a mount credential."""
+    fingerprint = hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
+    expires_at: int | None = None
+    parts = token.split(".")
+    if len(parts) == 3:
+        try:
+            payload = parts[1] + "=" * (-len(parts[1]) % 4)
+            claims = json.loads(base64.urlsafe_b64decode(payload))
+            claim_expiry = claims.get("exp")
+            if isinstance(claim_expiry, int):
+                expires_at = claim_expiry
+        except (ValueError, TypeError, json.JSONDecodeError):
+            pass
+
+    return {
+        "credential_fingerprint": fingerprint,
+        "credential_expires_at_unix": expires_at,
+        "credential_remaining_secs": (
+            max(0, expires_at - int(time.time())) if expires_at is not None else None
+        ),
+    }
