@@ -69,6 +69,9 @@ Builds and registers the `github-actions-runner` sandbox image. It is based on *
 (imported into the project as `ubuntu-2204-base`; the script imports it if missing) and installs
 systemd — booted as PID 1 so Docker's systemd units start — Docker CE, the `tl` CLI with FUSE
 support, and the GitHub Actions runner, and creates the `tl-user` account.
+The TLFS-capable `tl` binary is pinned in the Dockerfile and recorded as an OCI label so rebuilding
+an image cannot silently select a different mount implementation. Set
+`TENSORLAKE_RUNNER_CLI_VERSION=cli-vX.Y.Z` only when deliberately qualifying an upgrade.
 
 Base the image on an OS whose glibc matches your release ABI target: Ubuntu 22.04 ships glibc 2.35,
 which keeps release binaries within a GLIBC ≤ 2.34 floor. A newer base (e.g. Ubuntu 24.04 / glibc
@@ -114,6 +117,10 @@ directory (not an `actions/cache` service); point a tool's cache directory at a 
 - Writes autosave during the job; the orchestrator syncs and unmounts on exit. Provisioning is
   best-effort unless a workflow asserts the mount (see below).
 - Cleanup: `tl fs ls` lists the `github-actions-cache-*` volumes; `tl fs rm <name>` deletes one.
+- Readiness is an authenticated write/read/delete round trip, not merely a mount-table check. A
+  mounted but unauthorized or disconnected TLFS session is detached, given one freshly minted
+  credential retry, and never exported to a job unless that probe succeeds. Attempt logs include
+  only a non-reversible credential fingerprint and expiry, never the credential.
 
 Two reusable actions wrap the common cases — see each `action.yml` for inputs:
 

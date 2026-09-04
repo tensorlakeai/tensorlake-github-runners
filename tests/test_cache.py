@@ -5,10 +5,18 @@ import pytest
 from github_runner_orchestrator.cache import (
     CACHE_INITIALIZATION_PATH,
     MAX_FILESYSTEM_NAME_LENGTH,
-    cache_mount_environment,
+    cache_credential_diagnostics,
     cache_filesystem_name,
+    cache_mount_environment,
     ensure_cache_filesystem,
 )
+
+
+def _unsigned_jwt(payload: str) -> str:
+    import base64
+
+    encoded = base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
+    return f"header.{encoded}.signature"
 
 
 def test_cache_filesystem_name_is_stable_distinct_and_bounded() -> None:
@@ -173,3 +181,26 @@ def test_cache_mount_environment_uses_filesystem_scoped_credential(monkeypatch) 
         "TENSORLAKE_PROJECT_ID": "project_example",
         "TENSORLAKE_API_URL": "https://api.example.test",
     }
+
+
+def test_cache_credential_diagnostics_are_log_safe_and_report_expiry(monkeypatch) -> None:
+    monkeypatch.setattr("github_runner_orchestrator.cache.time.time", lambda: 1_700_000_000)
+    token = _unsigned_jwt('{"sub":"api-key:secret-id","exp":1700003600}')
+
+    diagnostics = cache_credential_diagnostics(token)
+
+    assert diagnostics == {
+        "credential_fingerprint": "0b663af87714",
+        "credential_expires_at_unix": 1_700_003_600,
+        "credential_remaining_secs": 3_600,
+    }
+    assert token not in str(diagnostics)
+    assert "secret-id" not in str(diagnostics)
+
+
+def test_cache_credential_diagnostics_tolerate_opaque_tokens() -> None:
+    diagnostics = cache_credential_diagnostics("opaque-development-token")
+
+    assert diagnostics["credential_expires_at_unix"] is None
+    assert diagnostics["credential_remaining_secs"] is None
+    assert diagnostics["credential_fingerprint"]
