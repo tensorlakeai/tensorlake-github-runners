@@ -15,7 +15,10 @@ concurrency:
 
 jobs:
   build:
-    runs-on: [self-hosted, tensorlake, tensorlake-small]
+    # The cutover label is deliberately absent from the legacy organization
+    # runners. The repository-scoped JIT orchestrator copies requested labels
+    # onto each one-job runner, making this workflow a permanent path canary.
+    runs-on: [self-hosted, tensorlake, tensorlake-small, tensorlake-repository-jit]
     timeout-minutes: 30
 
     steps:
