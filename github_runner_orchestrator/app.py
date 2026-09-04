@@ -50,6 +50,7 @@ CACHE_MOUNT_RETRY_SECONDS = 1
 CACHE_MOUNT_DETACH_TIMEOUT_SECS = 10
 CACHE_MOUNT_PROBE_TIMEOUT_SECS = 15
 GITHUB_ORG_OVERRIDE: str | None = None
+RUNNER_TENSORLAKE_API_KEY_SECRET = "RUNNER_TENSORLAKE_API_KEY"
 
 # The runner is launched as a detached, managed process and polled, rather than
 # streamed through a single long-lived sandbox.run() for the whole job. A
@@ -341,6 +342,7 @@ async def _prepare_cache_mount(
     sandbox,
     file_system_name: str,
     repository: str | None,
+    api_key: str,
 ) -> dict[str, str]:
     """Mint fresh authority and return only after the cache passes real FUSE I/O."""
     last_error: Exception | None = None
@@ -348,6 +350,7 @@ async def _prepare_cache_mount(
         mount_environment = await asyncio.to_thread(
             cache_mount_environment,
             file_system_name,
+            api_key,
         )
         process_name = (
             "tensorlake-cache-mount" if attempt == 1 else f"tensorlake-cache-mount-retry-{attempt}"
@@ -406,14 +409,13 @@ async def _prepare_cache_mount(
         "GITHUB_APP_INSTALLATION_ID",
         "GITHUB_APP_PRIVATE_KEY",
         "RUNNER_GROUP_ID",
-        "TENSORLAKE_API_KEY",
-        "TENSORLAKE_ORGANIZATION_ID",
-        "TENSORLAKE_PROJECT_ID",
+        RUNNER_TENSORLAKE_API_KEY_SECRET,
     ],
 )
 async def run_github_runner(request_data: dict) -> dict:
     from tensorlake.sandbox import AsyncSandbox
 
+    tensorlake_api_key = os.environ[RUNNER_TENSORLAKE_API_KEY_SECRET]
     request = _runner_request_from_dict(request_data)
     credentials = _github_credentials()
     installation_token = await asyncio.to_thread(get_installation_token, credentials)
@@ -436,6 +438,7 @@ async def run_github_runner(request_data: dict) -> dict:
             cache_filesystem_name = await asyncio.to_thread(
                 ensure_cache_filesystem,
                 request.repository,
+                tensorlake_api_key,
             )
             logger.info(
                 "Repository cache volume is ready",
@@ -459,6 +462,7 @@ async def run_github_runner(request_data: dict) -> dict:
         memory_mb=resources.memory_mb,
         disk_mb=resources.disk_mb,
         timeout_secs=RUNNER_TIMEOUT_SECS,
+        api_key=tensorlake_api_key,
     )
     logger.info(
         "Runner sandbox created",
@@ -482,6 +486,7 @@ async def run_github_runner(request_data: dict) -> dict:
                     sandbox,
                     cache_filesystem_name,
                     request.repository,
+                    tensorlake_api_key,
                 )
                 cache_mounted = True
                 logger.info(

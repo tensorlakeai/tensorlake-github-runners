@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 APPLICATION_FILE="${ROOT_DIR}/app.py"
 APPLICATION_NAME="github_runner_webhook"
+RUNNER_TENSORLAKE_API_KEY_SECRET="RUNNER_TENSORLAKE_API_KEY"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
 
@@ -30,7 +31,7 @@ print_installation_plan() {
   printf '  2. Authenticate the GitHub and Tensorlake CLIs.\n'
   printf '  3. Create and install a GitHub App for API credentials.\n'
   printf '     IMPORTANT: Disable the GitHub App webhook; it does not need a URL.\n'
-  printf '  4. Store Tensorlake project context, API credentials, and a generated webhook secret.\n'
+  printf '  4. Store the runner API credential and a generated webhook secret.\n'
   printf '     Tensorlake secrets exist independently of a deployment, so this happens first.\n'
   printf '  5. Build the reusable GitHub runner sandbox image.\n'
   printf '  6. Deploy the Tensorlake application and obtain its public endpoint URL.\n'
@@ -270,15 +271,15 @@ ensure_tensorlake_api_key_secret() {
   local tensorlake_api_key="${TENSORLAKE_API_KEY:-}"
   local api_key_env="${TMP_DIR}/tensorlake-api-key.env"
 
-  if [[ -z "${tensorlake_api_key}" ]] && tensorlake_secret_exists "TENSORLAKE_API_KEY"; then
-    printf 'Reusing the existing TENSORLAKE_API_KEY secret in this Tensorlake project.\n'
+  if [[ -z "${tensorlake_api_key}" ]] && tensorlake_secret_exists "${RUNNER_TENSORLAKE_API_KEY_SECRET}"; then
+    printf 'Reusing the existing %s secret in this Tensorlake project.\n' "${RUNNER_TENSORLAKE_API_KEY_SECRET}"
     return
   fi
 
   if [[ -z "${tensorlake_api_key}" ]]; then
     printf '\nThe deployed runner function needs a project API key to create Tensorlake sandboxes.\n'
     printf 'Create an API key in the Tensorlake project confirmed in step 2, then enter it below.\n'
-    printf 'The input is hidden and will be stored as the TENSORLAKE_API_KEY project secret.\n'
+    printf 'The input is hidden and will be stored as the %s project secret.\n' "${RUNNER_TENSORLAKE_API_KEY_SECRET}"
     prompt_secret_required tensorlake_api_key "Tensorlake project API key"
   else
     printf 'Using the Tensorlake API key supplied in TENSORLAKE_API_KEY.\n'
@@ -291,20 +292,12 @@ import sys
 
 value = os.environ["TENSORLAKE_API_KEY"].replace('"', '\\"')
 with open(sys.argv[1], "w", encoding="utf-8") as output:
-    output.write(f'TENSORLAKE_API_KEY="{value}"\n')
+    output.write(f'RUNNER_TENSORLAKE_API_KEY="{value}"\n')
 PY
   chmod 600 "${api_key_env}"
   tl secrets set --env-file "${api_key_env}"
   unset tensorlake_api_key
-  printf 'Stored TENSORLAKE_API_KEY in the active Tensorlake project.\n'
-}
-
-store_tensorlake_project_context_secrets() {
-  local context_env="${TMP_DIR}/tensorlake-context.env"
-
-  require_tensorlake_project_context
-  tl secrets set --env-file "${context_env}"
-  printf 'Stored the active Tensorlake organization and project IDs for cache provisioning.\n'
+  printf 'Stored %s in the active Tensorlake project.\n' "${RUNNER_TENSORLAKE_API_KEY_SECRET}"
 }
 
 generate_webhook_secret() {
@@ -437,7 +430,6 @@ upgrade_installation() {
   confirm "Upgrade this Tensorlake installation?" || exit 0
 
   ensure_tensorlake_api_key_secret
-  store_tensorlake_project_context_secrets
 
   info "Build the updated Tensorlake runner sandbox image"
   "${ROOT_DIR}/scripts/build-runner-image.sh"
@@ -488,7 +480,6 @@ resume_from_step_6() {
   fi
   tl secrets set "GITHUB_WEBHOOK_SECRET=${webhook_secret}"
   ensure_tensorlake_api_key_secret
-  store_tensorlake_project_context_secrets
 
   phase 6 "Deploy the Tensorlake application and obtain its webhook URL"
   deploy_log="${TMP_DIR}/deploy.log"
@@ -574,13 +565,11 @@ main() {
 
   phase 4 "Store secrets in Tensorlake before deployment"
   printf 'Tensorlake stores these secrets independently of the application deployment.\n'
-  printf 'The TENSORLAKE_API_KEY lets the deployed runner function create sandboxes in this project.\n'
-  printf 'The project context lets it lazily create one persistent cache volume per GitHub repository.\n'
+  printf 'The project API key lets the deployed runner function create sandboxes and cache volumes.\n'
   printf 'The generated GITHUB_WEBHOOK_SECRET is for the organization webhook in step 7,\n'
   printf 'not for the disabled webhook on the GitHub App. The same value is stored now and\n'
   printf 'sent to GitHub only after the deployment provides an endpoint URL.\n'
   ensure_tensorlake_api_key_secret
-  store_tensorlake_project_context_secrets
   webhook_secret="$(generate_webhook_secret)"
   private_key="$(<"${private_key_path}")"
   secret_env="${TMP_DIR}/secrets.env"

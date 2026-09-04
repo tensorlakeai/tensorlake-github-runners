@@ -29,12 +29,12 @@ def cache_filesystem_name(repository: str) -> str:
     return f"{CACHE_FILESYSTEM_NAME_PREFIX}-{slug[:available_slug_length]}{suffix}"
 
 
-def ensure_cache_filesystem(repository: str) -> str:
+def ensure_cache_filesystem(repository: str, api_key: str) -> str:
     """Find, create, and initialize the Cloud Volume used by one repository."""
     from tensorlake.filesystem import FilesystemClient
 
     name = cache_filesystem_name(repository)
-    client = FilesystemClient()
+    client = FilesystemClient(api_key=api_key)
 
     def existing_filesystem():
         for file_system in client.list():
@@ -77,11 +77,11 @@ def _initialize_cache_filesystem(file_system) -> None:
         raise
 
 
-def cache_mount_environment(file_system_name: str) -> dict[str, str]:
+def cache_mount_environment(file_system_name: str, api_key: str) -> dict[str, str]:
     """Mint the filesystem-scoped credential consumed by ``tl fs mount``."""
     from tensorlake.repositories import RepositoryClient
 
-    with RepositoryClient.from_env() as client:
+    with RepositoryClient(api_key=api_key) as client:
         credential = client.credential(file_system_name)
         environment = {
             "TENSORLAKE_GIT_TOKEN": credential.token,

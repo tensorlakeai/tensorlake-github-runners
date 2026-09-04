@@ -46,9 +46,10 @@ organization-owner access and a Tensorlake project.
 
 **Secrets** (set by the wizard, or manually with `tl secrets set`):
 `GITHUB_WEBHOOK_SECRET`, `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_INSTALLATION_ID`,
-`GITHUB_APP_PRIVATE_KEY`, `RUNNER_GROUP_ID` (default `1`), `TENSORLAKE_API_KEY` (project-scoped),
-`TENSORLAKE_ORGANIZATION_ID`, `TENSORLAKE_PROJECT_ID`. Redeploy after changing a secret so the new
-value takes effect. Find the org/project IDs with `tl whoami -o json`.
+`GITHUB_APP_PRIVATE_KEY`, `RUNNER_GROUP_ID` (default `1`), and
+`RUNNER_TENSORLAKE_API_KEY` (project-scoped). The runner-specific name avoids the runtime-owned
+`TENSORLAKE_*` environment namespace; the application passes the key explicitly to Tensorlake SDK
+clients. Redeploy after changing a secret so the new value takes effect.
 
 - **Upgrade:** `git pull --ff-only && ./scripts/configure-github-org.sh --upgrade`.
   The script defaults to Tensorlake organization `org_T7MwTdFrBRHdpQPWf8Jdh` and project
