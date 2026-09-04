@@ -260,7 +260,10 @@ def test_readme_explains_the_webhook_and_deployment_order() -> None:
 
 def test_self_hosted_workflow_builds_on_tensorlake_runner() -> None:
     workflow = Path(".github/workflows/build-reference.yml").read_text()
-    assert "runs-on: [self-hosted, tensorlake, tensorlake-small]" in workflow
+    assert (
+        "runs-on: [self-hosted, tensorlake, tensorlake-small, tensorlake-repository-jit]"
+        in workflow
+    )
     assert "uses: ./actions/setup-uv-cache" in workflow
     assert "uv build" in workflow
     assert "uv run --no-sync pytest -q" in workflow
