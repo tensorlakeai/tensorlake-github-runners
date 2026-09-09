@@ -10,7 +10,7 @@
 # account the base used to provide.
 FROM ubuntu-2204-base
 
-ENV TENSORLAKE_CLI_VERSION=cli-v0.5.123
+ENV TENSORLAKE_CLI_VERSION=cli-v0.5.130
 ENV DEBIAN_FRONTEND=noninteractive
 
 # The tl-user account (passwordless sudo + Docker access) that the orchestrator
