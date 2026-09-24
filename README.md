@@ -1,3 +1,7 @@
+> [!IMPORTANT]
+> This repository has moved to **[tensorlakeai/github-runners](https://github.com/tensorlakeai/github-runners)**.
+> Use `tensorlakeai/github-runners@v1` for the Tensorlake cache action. This repository is no longer maintained.
+
 # Tensorlake GitHub Workers
 
 Ephemeral GitHub Actions runners on Tensorlake. An organization `workflow_job` webhook schedules a
